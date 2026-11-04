@@ -1,0 +1,30 @@
+{
+  "name": "Food",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "nuxt build",
+    "dev": "nuxt dev --host 127.0.0.1",
+    "generate": "nuxt generate",
+    "preview": "nuxt preview",
+    "postinstall": "nuxt prepare",
+    "test": "tsx --test tests/core.test.ts",
+    "typecheck": "nuxt typecheck",
+    "test:integration": "npm run build && tsx --test tests/api.test.ts",
+    "start": "HOST=127.0.0.1 node .output/server/index.mjs",
+    "format": "prettier --write app shared server tests nuxt.config.ts package.json"
+  },
+  "dependencies": {
+    "@lucide/vue": "^1.67.0",
+    "nuxt": "^4.6.3",
+    "playwright-core": "^1.64.1",
+    "vue": "^3.5.44",
+    "vue-router": "^5.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "prettier": "^3.9.10",
+    "tsx": "^4.23.15",
+    "vue-tsc": "^3.3.14"
+  }
+}
