@@ -1,4 +1,4 @@
-import type { Offer, StoreMatch } from "../types";
+import type { Offer, StoreMatch, StoreMatchGroup } from "../types";
 
 export function normalizeStoreName(name: string): string {
   return name
@@ -24,13 +24,14 @@ function similarity(a: string, b: string): number {
   return (2 * intersection) / (x.size + y.size);
 }
 
-export function matchStores(xiaochan: Offer[], meituan: Offer[]): StoreMatch[] {
+export function matchStores(bawangcan: Offer[], meituan: Offer[]): StoreMatch[] {
   const matches: StoreMatch[] = [];
-  for (const x of xiaochan) {
+  for (const x of bawangcan) {
+    if (x.provider === "meituan") continue;
     for (const m of meituan) {
       let confidence: StoreMatch["confidence"] | undefined;
       let reason = "";
-      // A Xiaochan internal store ID and an anonymized Meituan -100/0 are never cross-platform IDs.
+      // Internal platform IDs and anonymized Meituan -100/0 are not shared store IDs.
       if (x.meituanPoiId && m.meituanPoiId) {
         if (x.meituanPoiId !== m.meituanPoiId) continue;
         confidence = "id";
@@ -52,7 +53,7 @@ export function matchStores(xiaochan: Offer[], meituan: Offer[]): StoreMatch[] {
       if (confidence)
         matches.push({
           id: `${x.id}::${m.id}`,
-          xiaochan: x,
+          bawangcan: x,
           meituan: m,
           confidence,
           reason,
@@ -60,4 +61,26 @@ export function matchStores(xiaochan: Offer[], meituan: Offer[]): StoreMatch[] {
     }
   }
   return matches;
+}
+
+export function groupStoreMatches(matches: StoreMatch[]): StoreMatchGroup[] {
+  const groups = new Map<string, StoreMatchGroup>();
+  const storeIdentity = (offer: Offer) =>
+    offer.meituanPoiId
+      ? ["poi", offer.meituanPoiId]
+      : offer.opaquePoiId
+        ? ["opaque", offer.opaquePoiId]
+        : ["name", normalizeStoreName(offer.name), offer.address?.trim() || ""];
+  for (const match of matches) {
+    const id = JSON.stringify([
+      match.bawangcan.provider,
+      storeIdentity(match.bawangcan),
+      storeIdentity(match.meituan),
+      match.bawangcan.product?.name.normalize("NFKC").trim().toLowerCase() || "",
+    ]);
+    const group = groups.get(id);
+    if (group) group.matches.push(match);
+    else groups.set(id, { id, matches: [match] });
+  }
+  return [...groups.values()];
 }

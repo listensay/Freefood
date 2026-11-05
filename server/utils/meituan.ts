@@ -1,17 +1,34 @@
 import { chromium } from "playwright-core";
+import { randomBytes } from "node:crypto";
 import type {
   Browser,
   BrowserContext,
   BrowserContextOptions,
   Page,
+  Frame,
 } from "playwright-core";
 import { createError } from "h3";
-import type { LocationSettings, Offer } from "../../shared/types";
+import type {
+  LocationSettings,
+  Offer,
+  RemoteLoginSession,
+  ReviewBonus,
+  SyncScope,
+} from "../../shared/types";
 import { safeUrl } from "../../shared/utils/import";
 import { loadSession, saveSession, withSessionLock } from "./session";
+import { isMeituanPage, parseRemoteAction } from "./remote-input";
+import {
+  activityAccessError,
+  MEITUAN_LOGIN_URL,
+  passportLoginIdentity,
+  passportRequestIssue,
+  type PassportIssue,
+} from "./meituan-login";
+import { MEITUAN_ACTIVITY_URL } from "../../shared/meituan";
+import { collectActivityPages, type ActivityPage } from "./activity-pages";
 
-export const MEITUAN_URL =
-  "https://offsiteact.meituan.com/web/hoae/collection_waimai_v8/index.html?recallBizId=cpsH5Coupon&bizId=224ac1afd8674632ae7b85226f192d82&mediumSrc1=224ac1afd8674632ae7b85226f192d82&scene=CPS_SELF_SRC&pageSrc1=CPS_SELF_OUT_SRC_H5_LINK&pageSrc2=224ac1afd8674632ae7b85226f192d82&pageSrc3=56fa34c7c97c46c8acc60c2b8d7ff7bb&activityId=6&mediaPvId=dafkdsajffjafdfs&mediaUserId=10086&outActivityId=6&hoaePageV=8&p=bcbbb3bf73584d31a709338f189d88c2";
+export const MEITUAN_URL = MEITUAN_ACTIVITY_URL;
 
 interface BrowserSession {
   browser: Browser;
@@ -26,10 +43,97 @@ interface BrowserSession {
   error?: string;
   userError?: string;
   captureAfter: number;
+  remote?: { token: string; expiresAt: number; verifying: boolean };
+  tasks: Promise<unknown>;
+  pendingTasks: number;
+  pointerDown: boolean;
+  passportUserId?: string;
+  passportSessionEstablished: boolean;
+  pageError?: string;
+  offerPages: Map<number, ActivityPage>;
+  offerRequest?: { frame: Frame; body: Record<string, unknown>; headers: Record<string, string> };
+  loginIssue?: PassportIssue;
 }
 
 const browsers = new Map<string, BrowserSession>();
 const launching = new Map<string, Promise<BrowserSession>>();
+const browserEpochs = new Map<string, number>();
+const remoteViewport = { width: 480, height: 680 };
+
+function browserTask<T>(
+  state: BrowserSession,
+  task: () => Promise<T>,
+): Promise<T> {
+  if (state.pendingTasks >= 32)
+    throw createError({
+      statusCode: 429,
+      statusMessage: "操作过于频繁，请稍后重试",
+    });
+  state.pendingTasks++;
+  const current = state.tasks.catch(() => {}).then(task);
+  state.tasks = current;
+  return current.finally(() => {
+    state.pendingTasks--;
+  });
+}
+
+function remoteState(
+  id: string,
+  token: string,
+  allowVerifying = false,
+): BrowserSession {
+  const state = browsers.get(id);
+  if (
+    !state?.browser.isConnected() ||
+    !state.remote ||
+    state.remote.expiresAt <= Date.now()
+  )
+    throw createError({
+      statusCode: 410,
+      statusMessage: "登录窗口已关闭，请重新打开",
+    });
+  if (!/^[a-f0-9]{64}$/.test(token) || state.remote.token !== token)
+    throw createError({ statusCode: 403, statusMessage: "登录会话不匹配" });
+  if (state.remote.verifying && !allowVerifying)
+    throw createError({ statusCode: 409, statusMessage: "正在验证登录" });
+  state.lastUsed = Date.now();
+  return state;
+}
+
+export function isMeituanRemoteActive(id: string, token: string): boolean {
+  try {
+    remoteState(id, token);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function hasMeituanBrowser(id: string): boolean {
+  return !!browsers.get(id)?.browser.isConnected() || launching.has(id);
+}
+
+export function meituanLoginIssue(
+  id: string,
+  token: string,
+): PassportIssue | undefined {
+  return remoteState(id, token).loginIssue;
+}
+
+function currentPage(state: BrowserSession): Page {
+  if (state.page.isClosed()) {
+    const page = state.context
+      .pages()
+      .find((page) => !page.isClosed() && isMeituanPage(page.url()));
+    if (!page)
+      throw createError({
+        statusCode: 410,
+        statusMessage: "登录页面已关闭，请重新打开",
+      });
+    state.page = page;
+  }
+  return state.page;
+}
 
 export function normalizeMeituan(data: any): Offer[] {
   if (!Array.isArray(data.infos)) throw new Error("美团活动列表结构发生变化");
@@ -57,6 +161,25 @@ export function normalizeMeituan(data: any): Offer[] {
       const activityId = String(plan.poiEventId || plan.marketingId || "");
       if (!activityId) throw new Error("美团活动缺少唯一 ID");
       const distance = /^(\d+(?:\.\d+)?)\s*(km|m)$/i.exec(store.distance || "");
+      let reviewBonus: ReviewBonus | undefined;
+      if (
+        plan.unifyToUserCommentRatio !== undefined ||
+        plan.unifyToUserCommentCommission !== undefined
+      ) {
+        const bonusRatio = Number(plan.unifyToUserCommentRatio);
+        const bonusCap = Number(plan.unifyToUserCommentCommission);
+        if (
+          !Number.isSafeInteger(bonusRatio) ||
+          bonusRatio < 0 ||
+          bonusRatio > 10_000 ||
+          !Number.isSafeInteger(bonusCap) ||
+          bonusCap < 0 ||
+          bonusCap > 100_000_000
+        )
+          throw new Error("美团评价加返字段无效，已停止计算");
+        if (bonusRatio > 0 && bonusCap > 0)
+          reviewBonus = { ratioBps: bonusRatio, capCents: bonusCap };
+      }
       offers.push({
         id: `meituan:${row.poi_id_str || poiId || store.name}:${activityId}`,
         provider: "meituan",
@@ -86,6 +209,7 @@ export function normalizeMeituan(data: any): Offer[] {
           ratioBps: ratio,
           capCents: cap,
         },
+        reviewBonus,
         url: safeUrl(row.lpUrl),
         collectedAt: now,
         source: "live",
@@ -131,31 +255,66 @@ async function applyLocation(
   }, location);
 }
 
+async function showPassportForm(page: Page) {
+  const switcher = page.getByText("手机动态码登录", { exact: true }).first();
+  if (await switcher.isVisible().catch(() => false))
+    await switcher.click({ timeout: 3000 });
+  const sms = page.locator("#J-mobile-form");
+  const normal = page.locator("#J-normal-form");
+  const form = (await sms.isVisible().catch(() => false)) ? sms : normal;
+  if (await form.isVisible().catch(() => false))
+    await form.scrollIntoViewIfNeeded();
+}
+
 export async function closeMeituan(id: string) {
+  browserEpochs.set(id, (browserEpochs.get(id) || 0) + 1);
   const session = browsers.get(id);
   browsers.delete(id);
   if (session) await session.browser.close().catch(() => {});
 }
 
 export async function closeAllMeituan() {
-  await Promise.all([...browsers.keys()].map(closeMeituan));
+  await Promise.all(
+    [...new Set([...browsers.keys(), ...launching.keys()])].map(closeMeituan),
+  );
+  await Promise.allSettled([...launching.values()]);
+}
+
+export async function closeIdleMeituan() {
+  const now = Date.now();
+  await Promise.all(
+    [...browsers]
+      .filter(
+        ([, state]) =>
+          now - state.lastUsed > 15 * 60_000 ||
+          (state.remote && state.remote.expiresAt <= now),
+      )
+      .map(([id]) => closeMeituan(id)),
+  );
 }
 
 async function openBrowser(
   id: string,
   headed: boolean,
+  initialUrl = MEITUAN_URL,
 ): Promise<BrowserSession> {
   const existing = browsers.get(id);
-  if (existing?.browser.isConnected() && (!headed || existing.headed)) {
+  if (existing?.browser.isConnected() && existing.headed === headed) {
     existing.lastUsed = Date.now();
     return existing;
   }
   if (launching.has(id)) return launching.get(id)!;
   const launch = (async () => {
-    await closeMeituan(id);
+    const epoch = (browserEpochs.get(id) || 0) + 1;
+    browserEpochs.set(id, epoch);
+    browsers.delete(id);
+    if (existing) await existing.browser.close().catch(() => {});
     for (const [key, value] of browsers)
       if (Date.now() - value.lastUsed > 15 * 60_000) await closeMeituan(key);
-    if (browsers.size >= 3)
+    const pending = [...launching.keys()].filter(
+      (key) => key !== id && !browsers.has(key),
+    ).length;
+    if (browsers.size + pending >= 3)
       throw createError({
         statusCode: 429,
         statusMessage: "登录窗口过多，请关闭不用的会话",
@@ -171,11 +330,12 @@ async function openBrowser(
     } catch {
       throw createError({
         statusCode: 503,
-        statusMessage:
-          "无法打开登录窗口，请检查 Google Chrome 配置",
+        statusMessage: "无法打开登录页面，请检查服务端 Google Chrome 配置",
       });
     }
     try {
+      if (browserEpochs.get(id) !== epoch)
+        throw createError({ statusCode: 410, statusMessage: "登录窗口已关闭" });
       const context = await browser.newContext({
         viewport: { width: 480, height: 850 },
         permissions: ["geolocation"],
@@ -184,6 +344,9 @@ async function openBrowser(
       });
       if (local.location) await applyLocation(context, local.location);
       const page = await context.newPage();
+      page.on("download", (download) => {
+        void download.cancel().catch(() => {});
+      });
       const state: BrowserSession = {
         browser,
         context,
@@ -191,30 +354,115 @@ async function openBrowser(
         headed,
         lastUsed: Date.now(),
         offers: [],
+        offerPages: new Map(),
         phone: "",
         userChecked: false,
         captureAfter: Date.now(),
+        tasks: Promise.resolve(),
+        pendingTasks: 0,
+        pointerDown: false,
+        passportSessionEstablished: false,
       };
       browsers.set(id, state);
+      await context.route("**/*", async (route) => {
+        const request = route.request();
+        if (
+          request.isNavigationRequest() &&
+          !request.frame().parentFrame() &&
+          !isMeituanPage(request.url())
+        )
+          return route.abort();
+        return route.fallback();
+      });
+      context.on("page", (popup) => {
+        popup.on("download", (download) => {
+          void download.cancel().catch(() => {});
+        });
+        void popup
+          .waitForURL((url) => isMeituanPage(url.href), {
+            waitUntil: "domcontentloaded",
+            timeout: 15_000,
+          })
+          .then(async () => {
+            if (state.remote) await popup.setViewportSize(remoteViewport);
+            state.page = popup;
+          })
+          .catch(() => popup.close().catch(() => {}));
+      });
       context.on("response", (response) => {
         const url = new URL(response.url());
+        if (
+          url.origin === "https://passport.meituan.com" &&
+          [
+            "/api/v3/account/mobileloginapply",
+            "/api/v3/account/mobilelogin",
+            "/account/unitivelogin",
+          ].includes(url.pathname) &&
+          response.request().method() === "POST"
+        ) {
+          if (!response.ok()) {
+            state.loginIssue = passportRequestIssue(response.status());
+            return;
+          }
+          void response
+            .json()
+            .then((data) => {
+              state.loginIssue = passportRequestIssue(response.status(), data);
+              const userId =
+                url.pathname === "/api/v3/account/mobileloginapply"
+                  ? undefined
+                  : passportLoginIdentity(data);
+              if (userId) {
+                state.passportUserId = userId;
+              }
+            })
+            .catch(() => {
+              state.loginIssue = "network";
+            });
+          return;
+        }
+        if (
+          url.origin === "https://www.meituan.com" &&
+          url.pathname === "/account/settoken" &&
+          response.request().method() === "POST" &&
+          (response.ok() || [301, 302, 303].includes(response.status()))
+        ) {
+          // This is the official SSO continuation, not a cookie inferred from user input.
+          state.passportSessionEstablished = true;
+          return;
+        }
         if (url.origin !== "https://offsiteact.meituan.com") return;
         if (
-          !["/act/ge/getUserInfo", "/act/ge/queryPoiByRecallBiz"].includes(
-            url.pathname,
-          )
+          ![
+            "/act/ge/getUserInfo",
+            "/act/ge/queryPoiByRecallBiz",
+            "/act/ge/getPageModuleInfo",
+          ].includes(url.pathname)
         )
           return;
         const generation = state.captureAfter;
         if (response.request().timing().startTime < generation) return;
+        let offerRequest: Record<string, any> | undefined;
+        if (url.pathname === "/act/ge/queryPoiByRecallBiz") {
+          try {
+            offerRequest = JSON.parse(response.request().postData() || "{}");
+          } catch { return; }
+          if (offerRequest?.recallBizId !== "cpsSelfPromotionOrder") return;
+        }
         void (async () => {
           if (!response.ok()) {
-            const message =
-              response.status() === 403
-                ? "美团触发安全校验，请在官方窗口完成验证"
-                : `美团官方接口返回 HTTP ${response.status()}，请稍后重试`;
+            const message = activityAccessError(
+              response.status(),
+              url.pathname === "/act/ge/getUserInfo"
+                ? "identity"
+                : url.pathname === "/act/ge/getPageModuleInfo"
+                  ? "page"
+                  : "offers",
+            );
             if (url.pathname === "/act/ge/getUserInfo")
               state.userError = message;
+            else if (url.pathname === "/act/ge/getPageModuleInfo")
+              state.pageError = message;
             else state.error = message;
             return;
           }
@@ -223,45 +471,74 @@ async function openBrowser(
           if (!response.ok() || Number(data.ret) !== 0) {
             if (url.pathname === "/act/ge/getUserInfo")
               state.userError = "美团身份接口拒绝访问，请完成官方安全验证";
+            else if (url.pathname === "/act/ge/getPageModuleInfo")
+              state.pageError = "美团活动页面加载失败，请稍后重试";
             else
               state.error =
-                "美团活动接口拒绝访问，请在官方窗口完成验证后再刷新";
+                "美团活动接口拒绝访问，请在登录页面完成验证后再刷新";
+            return;
+          }
+          if (url.pathname === "/act/ge/getPageModuleInfo") {
+            state.pageError = undefined;
             return;
           }
           if (url.pathname === "/act/ge/getUserInfo") {
             state.phone = String(data.data?.phone || "");
             state.userChecked = true;
           } else {
-            let request: any;
-            try {
-              request = JSON.parse(response.request().postData() || "{}");
-            } catch {
-              return;
-            }
-            if (request.recallBizId !== "cpsSelfPromotionOrder") return;
+            const request = offerRequest!;
             const offers = normalizeMeituan(data);
-            state.offers = offers;
+            const pageNo = request.pageNo ?? 1;
+            if (!Number.isInteger(pageNo) || pageNo < 1) return;
+            const requestHeaders = await response.request().allHeaders();
+            if (generation !== state.captureAfter) return;
+            state.offerRequest = {
+              frame: response.request().frame(),
+              body: request,
+              headers: Object.fromEntries(Object.entries(requestHeaders).filter(([name]) => name === "content-type")),
+            };
+            state.offerPages.set(pageNo, {
+              offers,
+              rowKeys: data.infos.map((row: any) => String(row.poi_id_str || row.poiId || row.poiBaseInfo?.name)),
+              hasMore: data.infos.length > 0 && data.hasMore !== false,
+            });
+            state.offers = [...new Map([...state.offerPages.values()].flatMap(page => page.offers).map(offer => [offer.id, offer])).values()];
             state.capturedAt = new Date().toISOString();
             state.error = undefined;
           }
         })().catch((error: any) => {
           if (generation !== state.captureAfter) return;
           if (url.pathname === "/act/ge/getUserInfo")
-            state.userError = "无法解析美团身份响应，请重新打开官方登录窗口";
+            state.userError = "无法解析美团身份响应，请重新打开登录页面";
           else
             state.error = error.message?.startsWith("美团")
               ? error.message
               : "无法解析美团活动，请检查官方页面或稍后再试";
         });
       });
-      await page.goto(MEITUAN_URL, {
+      context.on("requestfailed", (request) => {
+        const url = new URL(request.url());
+        if (
+          url.origin === "https://passport.meituan.com" &&
+          [
+            "/api/v3/account/mobileloginapply",
+            "/api/v3/account/mobilelogin",
+            "/account/unitivelogin",
+          ].includes(url.pathname) &&
+          request.method() === "POST"
+        )
+          state.loginIssue = "network";
+      });
+      await page.goto(initialUrl, {
         waitUntil: "domcontentloaded",
         timeout: 30_000,
       });
+      if (browserEpochs.get(id) !== epoch || browsers.get(id) !== state)
+        throw createError({ statusCode: 410, statusMessage: "登录窗口已关闭" });
       return state;
     } catch (error) {
       await browser.close();
-      browsers.delete(id);
+      if (browsers.get(id)?.browser === browser) browsers.delete(id);
       throw error;
     }
   })();
@@ -273,22 +550,105 @@ async function openBrowser(
   }
 }
 
-export async function startMeituanLogin(id: string) {
-  const state = await openBrowser(id, true);
-  await state.page.bringToFront();
-  // The site's own component sends SMS and handles CAPTCHA. Never proxy or bypass its risk checks.
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    for (const frame of state.page.frames()) {
-      const login = frame.getByText("登录", { exact: true }).first();
-      if (await login.isVisible().catch(() => false)) {
-        await login.click({ timeout: 3000 }).catch(() => {});
-        return;
-      }
-    }
-    if (state.phone) return;
-    await new Promise((resolve) => setTimeout(resolve, 500));
+export async function startMeituanLogin(
+  id: string,
+): Promise<RemoteLoginSession> {
+  const state = await openBrowser(id, false, MEITUAN_LOGIN_URL);
+  return browserTask(state, async () => {
+    const page = currentPage(state);
+    await page.setViewportSize(remoteViewport);
+    const resume = !!state.remote;
+    if (!resume && page.url() !== MEITUAN_LOGIN_URL)
+      await page.goto(MEITUAN_LOGIN_URL, {
+        waitUntil: "domcontentloaded",
+        timeout: 30_000,
+      });
+    state.remote = {
+      token: randomBytes(32).toString("hex"),
+      expiresAt: Date.now() + 15 * 60_000,
+      verifying: false,
+    };
+    // Select the official SMS form without sending a code or accepting agreements.
+    if (!resume) await showPassportForm(page);
+    return {
+      token: state.remote.token,
+      viewport: remoteViewport,
+      expiresAt: new Date(state.remote.expiresAt).toISOString(),
+    };
+  });
+}
+
+export async function captureMeituanFrame(id: string, token: string) {
+  const state = remoteState(id, token);
+  return browserTask(state, async () => {
+    remoteState(id, token);
+    const image = await currentPage(state).screenshot({
+      type: "jpeg",
+      quality: 85,
+      timeout: 5000,
+    });
+    remoteState(id, token);
+    return image;
+  });
+}
+
+export async function inputMeituanRemote(
+  id: string,
+  token: string,
+  input: unknown,
+) {
+  const state = remoteState(id, token);
+  let action;
+  try {
+    action = parseRemoteAction(input, remoteViewport);
+  } catch (error: any) {
+    throw createError({ statusCode: 400, statusMessage: error.message });
   }
+  return browserTask(state, async () => {
+    remoteState(id, token);
+    const page = currentPage(state);
+    switch (action.type) {
+      case "pointer":
+        await page.mouse.move(action.x, action.y);
+        if (action.phase === "down") {
+          if (state.pointerDown) await page.mouse.up();
+          await page.mouse.down();
+          state.pointerDown = true;
+        } else if (action.phase === "up") {
+          await page.mouse.up();
+          state.pointerDown = false;
+        }
+        break;
+      case "text":
+        if (action.text.length <= 64 && /^[\x20-\x7e]+$/.test(action.text))
+          await page.keyboard.type(action.text);
+        else await page.keyboard.insertText(action.text);
+        break;
+      case "key":
+        await page.keyboard.press(action.key);
+        break;
+      case "wheel":
+        await page.mouse.wheel(action.deltaX, action.deltaY);
+        break;
+      case "reload":
+        state.loginIssue = undefined;
+        if (state.pointerDown) {
+          await page.mouse.up();
+          state.pointerDown = false;
+        }
+        await page.goto(MEITUAN_LOGIN_URL, {
+          waitUntil: "domcontentloaded",
+          timeout: 30_000,
+        });
+        await showPassportForm(page);
+        break;
+    }
+  });
+}
+
+export async function endMeituanRemote(id: string, token: string) {
+  remoteState(id, token, true);
+  await closeMeituan(id);
 }
 
 async function waitForOfficialData(
@@ -299,32 +659,77 @@ async function waitForOfficialData(
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     if (state.userChecked && (!needsOffers || state.capturedAt)) return;
-    if (state.userError || (needsOffers && state.error))
+    if (state.userError || state.pageError || (needsOffers && state.error))
       throw createError({
         statusCode: 502,
-        statusMessage: state.userError || state.error,
+        statusMessage: state.userError || state.pageError || state.error,
       });
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw createError({
     statusCode: 504,
-    statusMessage:
-      "美团活动加载失败，请检查官方窗口后重试",
+    statusMessage: "美团活动加载失败，请检查登录页面后重试",
   });
 }
 
-export async function verifyMeituanLogin(id: string) {
-  const state = await openBrowser(id, false);
-  state.userChecked = false;
-  state.error = undefined;
-  state.userError = undefined;
-  state.captureAfter = Date.now();
-  state.capturedAt = undefined;
-  await state.page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
-  await waitForOfficialData(state, 30_000, false);
+export async function verifyMeituanLogin(id: string, token?: string) {
+  const state = token ? remoteState(id, token) : await openBrowser(id, false);
+  if (state.remote) state.remote.verifying = true;
+  let phone: string,
+    storage: Awaited<ReturnType<BrowserContext["storageState"]>>,
+    accountOnly = false;
+  try {
+    ({ phone, storage, accountOnly } = await browserTask(state, async () => {
+      const passportAuthenticated =
+        !!state.passportUserId && state.passportSessionEstablished;
+      if (
+        !passportAuthenticated &&
+        currentPage(state).url().startsWith("https://passport.meituan.com/")
+      )
+        throw createError({
+          statusCode: 401,
+          statusMessage: "请先完成美团官方登录",
+        });
+      const authenticatedStorage = passportAuthenticated
+        ? await state.context.storageState()
+        : undefined;
+      state.userChecked = false;
+      state.error = undefined;
+      state.userError = undefined;
+      state.pageError = undefined;
+      state.captureAfter = Date.now();
+      state.capturedAt = undefined;
+      try {
+        await currentPage(state).goto(MEITUAN_URL, {
+          waitUntil: "domcontentloaded",
+          timeout: 30_000,
+        });
+        await waitForOfficialData(state, 30_000, false);
+      } catch (error) {
+        if (!authenticatedStorage) throw error;
+        return { phone: "", storage: authenticatedStorage, accountOnly: true };
+      }
+      if (!state.phone && authenticatedStorage)
+        return { phone: "", storage: authenticatedStorage, accountOnly: true };
+      return {
+        phone: state.phone,
+        storage: await state.context.storageState(),
+        accountOnly: false,
+      };
+    }));
+  } finally {
+    if (state.remote) state.remote.verifying = false;
+  }
   await withSessionLock(id, async () => {
+    if (browsers.get(id) !== state || !state.browser.isConnected())
+      throw createError({ statusCode: 410, statusMessage: "登录窗口已关闭" });
+    if (token && state.remote?.token !== token)
+      throw createError({
+        statusCode: 403,
+        statusMessage: "登录会话已更新，请重新打开",
+      });
     const local = await loadSession(id);
-    if (!state.phone) {
+    if (!phone && !accountOnly) {
       local.connections.meituan = {
         state: "expired",
         label: "未登录",
@@ -336,35 +741,130 @@ export async function verifyMeituanLogin(id: string) {
         statusMessage: "美团尚未登录，请完成官方登录",
       });
     }
-    local.meituanStorage = await state.context.storageState();
+    local.meituanStorage = storage;
     local.connections.meituan = {
-      state: "connected",
-      label: maskPhone(state.phone),
+      state: accountOnly ? "configured" : "connected",
+      label: maskPhone(phone),
       updatedAt: new Date().toISOString(),
-      message: "登录成功",
+      message: accountOnly ? "账号已登录，活动连接失败" : "登录成功",
     };
     await saveSession(id, local);
   });
+  if (token && state.remote?.token === token && browsers.get(id) === state)
+    await closeMeituan(id);
 }
 
 export async function fetchMeituan(
   id: string,
   location: LocationSettings,
+  scope?: SyncScope,
 ): Promise<Offer[]> {
   const state = await openBrowser(id, false);
-  state.lastUsed = Date.now();
-  state.userChecked = false;
-  state.capturedAt = undefined;
-  state.error = undefined;
-  state.userError = undefined;
-  state.captureAfter = Date.now();
-  await applyLocation(state.context, location);
-  await state.page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
-  await waitForOfficialData(state);
-  if (!state.phone)
-    throw createError({
-      statusCode: 401,
-      statusMessage: "美团登录已失效，请重新完成官方登录",
+  return browserTask(state, async () => {
+    state.lastUsed = Date.now();
+    state.userChecked = false;
+    state.capturedAt = undefined;
+    state.offerPages.clear();
+    state.offerRequest = undefined;
+    state.offers = [];
+    state.error = undefined;
+    state.userError = undefined;
+    state.pageError = undefined;
+    state.captureAfter = Date.now();
+    await applyLocation(state.context, location);
+    await currentPage(state).goto(MEITUAN_URL, {
+      waitUntil: "domcontentloaded",
+      timeout: 30_000,
     });
-  return state.offers;
+    await waitForOfficialData(state);
+    if (!state.phone)
+      throw createError({
+        statusCode: 401,
+        statusMessage: "美团登录已失效，请重新完成官方登录",
+      });
+    if (!scope) return state.offers;
+    return collectActivityPages(async (index) => {
+      const pageNo = index + 1;
+      const captured = state.offerPages.get(pageNo);
+      if (captured) return captured;
+      const request = state.offerRequest;
+      if (
+        !request ||
+        !request.frame.url().startsWith("https://offsiteact.meituan.com/")
+      )
+        throw createError({
+          statusCode: 502,
+          statusMessage: "美团活动分页请求缺失，请重新同步",
+        });
+      // Sign each new page with the official SDK in the authenticated browser.
+      let result;
+      try {
+        result = await request.frame.evaluate(
+          async ({ body, headers, pageNo }) => {
+            const url = "/act/ge/queryPoiByRecallBiz";
+            const { riskParams, ...payload } = body;
+            const data: Record<string, unknown> = { ...payload, pageNo };
+            const guard = (globalThis as unknown as {
+              H5guard?: {
+                sign(request: {
+                  url: string;
+                  method: string;
+                  data: Record<string, unknown>;
+                  headers: Record<string, string>;
+                }): Promise<{ headers?: Record<string, string> }>;
+              };
+            }).H5guard;
+            if (!guard?.sign) throw new Error("美团活动请求校验未加载");
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            let signed;
+            try {
+              signed = await Promise.race([
+                guard.sign({ url, method: "POST", data, headers }),
+                new Promise<never>((_, reject) => {
+                  timer = setTimeout(() => reject(new Error("美团活动请求校验超时")), 15_000);
+                }),
+              ]);
+            } finally {
+              clearTimeout(timer);
+            }
+            const signature = signed?.headers?.mtgsig;
+            if (!signature) throw new Error("美团活动请求校验失败");
+            // The official client adds riskParams after signing the request.
+            if (riskParams !== undefined) data.riskParams = riskParams;
+            const response = await fetch(url, {
+              method: "POST",
+              credentials: "include",
+              redirect: "error",
+              headers: { ...headers, mtgsig: signature },
+              body: JSON.stringify(data),
+              signal: AbortSignal.timeout(15_000),
+            });
+            return { status: response.status, data: await response.json().catch(() => undefined) };
+          },
+          { body: request.body, headers: request.headers, pageNo },
+        );
+      } catch {
+        throw createError({
+          statusCode: 502,
+          statusMessage: "美团活动分页加载失败，请重新同步",
+        });
+      }
+      if (result.status !== 200 || Number(result.data?.ret) !== 0)
+        throw createError({
+          statusCode: result.status === 401 ? 401 : 502,
+          statusMessage: activityAccessError(result.status, "offers"),
+        });
+      const offers = normalizeMeituan(result.data);
+      const page = {
+        offers,
+        rowKeys: result.data.infos.map((row: any) =>
+          String(row.poi_id_str || row.poiId || row.poiBaseInfo?.name),
+        ),
+        hasMore: result.data.infos.length > 0 && result.data.hasMore !== false,
+      };
+      state.offerPages.set(pageNo, page);
+      state.lastUsed = Date.now();
+      return page;
+    }, scope.radiusMeters);
+  });
 }

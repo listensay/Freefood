@@ -6,13 +6,15 @@ import {
   createError,
   getCookie,
   setCookie,
-  getHeader,
   getRequestURL,
 } from "h3";
 import type { DashboardData } from "../../shared/types";
+import { providers } from "../../shared/types";
+import { assertRequestAccess } from "./request-access";
 
 export interface LocalSession extends DashboardData {
   xiaochanHeaders?: Record<string, string>;
+  waimaiToken?: string;
   meituanStorage?: unknown;
   lastSync?: number;
 }
@@ -43,20 +45,7 @@ async function encryptionKey(): Promise<Buffer> {
 }
 
 export function assertLocalRequest(event: H3Event) {
-  const url = getRequestURL(event);
-  if (!["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))
-    throw createError({
-      statusCode: 403,
-      statusMessage: "此工具仅允许本机使用，请通过 localhost 访问",
-    });
-  const origin = getHeader(event, "origin");
-  if (origin && origin !== url.origin)
-    throw createError({ statusCode: 403, statusMessage: "拒绝跨站请求" });
-  if (getHeader(event, "sec-fetch-site") === "cross-site")
-    throw createError({ statusCode: 403, statusMessage: "拒绝跨站请求" });
-  if (event.method !== "GET" && getHeader(event, "x-food-request") !== "1")
-    throw createError({ statusCode: 403, statusMessage: "缺少请求校验头" });
-  event.node.res.setHeader("Cache-Control", "no-store");
+  assertRequestAccess(event, import.meta.dev === true);
 }
 
 export function sessionId(event: H3Event): string {
@@ -67,7 +56,7 @@ export function sessionId(event: H3Event): string {
     setCookie(event, "food-session", id, {
       httpOnly: true,
       sameSite: "strict",
-      secure: getRequestURL(event).protocol === "https:",
+      secure: getRequestURL(event, { xForwardedProto: false }).protocol === "https:",
       path: "/",
       maxAge: 30 * 86400,
     });
@@ -80,9 +69,10 @@ export function emptySession(): LocalSession {
     location: null,
     connections: {
       xiaochan: { state: "disconnected", label: "未连接" },
+      waimai: { state: "disconnected", label: "未连接" },
       meituan: { state: "disconnected", label: "未登录" },
     },
-    offers: { xiaochan: [], meituan: [] },
+    offers: { xiaochan: [], waimai: [], meituan: [] },
     updatedAt: {},
   };
 }
@@ -114,7 +104,12 @@ export async function loadSession(id: string): Promise<LocalSession> {
     session = emptySession();
   }
   let changed = false;
-  for (const provider of ["xiaochan", "meituan"] as const) {
+  for (const provider of providers) {
+    if (!session.connections[provider] || !session.offers[provider]) {
+      session.connections[provider] ||= emptySession().connections[provider];
+      session.offers[provider] ||= [];
+      changed = true;
+    }
     const offers = session.offers[provider].filter(
       offer => offer.source === "live" || offer.source === "import",
     );

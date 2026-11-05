@@ -4,12 +4,18 @@ import {
   sessionId,
   withSessionLock,
 } from "../../../utils/session";
-import { startMeituanLogin } from "../../../utils/meituan";
+import {
+  isMeituanRemoteActive,
+  startMeituanLogin,
+} from "../../../utils/meituan";
+import { remoteOperation } from "../../../utils/remote-request";
 
 export default defineEventHandler(async (event) => {
   const id = sessionId(event);
-  await startMeituanLogin(id);
+  const remote = await remoteOperation(() => startMeituanLogin(id));
   await withSessionLock(id, async () => {
+    if (!isMeituanRemoteActive(id, remote.token))
+      throw createError({ statusCode: 410, statusMessage: "登录窗口已关闭" });
     const session = await loadSession(id);
     if (session.connections.meituan.state !== "connected")
       session.connections.meituan = {
@@ -19,5 +25,5 @@ export default defineEventHandler(async (event) => {
       };
     await saveSession(id, session);
   });
-  return { message: "登录窗口已打开" };
+  return remote;
 });

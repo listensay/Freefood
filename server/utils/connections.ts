@@ -14,13 +14,14 @@ export async function disconnectPlatform(event: H3Event, provider: Provider) {
   return withSessionLock(id, async () => {
     const session = await loadSession(id);
     if (provider === "xiaochan") delete session.xiaochanHeaders;
+    else if (provider === "waimai") delete session.waimaiToken;
     else {
       await closeMeituan(id);
       delete session.meituanStorage;
     }
     session.connections[provider] = {
       state: "disconnected",
-      label: provider === "xiaochan" ? "未连接" : "未登录",
+      label: provider === "meituan" ? "未登录" : "未连接",
     };
     session.offers[provider] = [];
     delete session.updatedAt[provider];

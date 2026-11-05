@@ -5,21 +5,31 @@ import {
   withSessionLock,
   publicSession,
 } from "../utils/session";
-import { fetchXiaochan } from "../utils/xiaochan";
+import { fetchXiaochan, isXiaochanGuest } from "../utils/xiaochan";
 import { fetchMeituan } from "../utils/meituan";
+import { fetchWaimai } from "../utils/waimai";
+import { COMPARISON_RADIUS_METERS } from "../../shared/utils/scope";
 
 export default defineEventHandler(async (event) => {
   const id = sessionId(event);
+  const body = await readBody(event);
+  if (body?.provider !== undefined && !["xiaochan", "waimai"].includes(body.provider))
+    throw createError({ statusCode: 400, statusMessage: "请选择霸王餐平台" });
   return withSessionLock(id, async () => {
     const session = await loadSession(id);
+    const syncXiaochan = body?.provider !== "waimai" && !!session.xiaochanHeaders;
+    const syncWaimai = body?.provider !== "xiaochan" &&
+      session.waimaiToken !== undefined && session.connections.waimai.state === "configured";
+    const syncMeituan = session.connections.meituan.state === "connected" ||
+      (session.connections.meituan.state === "configured" && !!session.meituanStorage);
     if (session.lastSync && Date.now() - session.lastSync < 30_000)
       throw createError({
         statusCode: 429,
         statusMessage: "请等待 30 秒后重试",
       });
     if (
-      !session.xiaochanHeaders &&
-      session.connections.meituan.state !== "connected"
+      !syncXiaochan && !syncWaimai &&
+      !syncMeituan
     )
       throw createError({
         statusCode: 400,
@@ -29,20 +39,26 @@ export default defineEventHandler(async (event) => {
       statusCode: 400,
       statusMessage: "请先设置收餐地址",
     });
+    if (syncWaimai && !session.location.cityName)
+      throw createError({ statusCode: 400, statusMessage: "请填写收餐地址的城市名称" });
     session.lastSync = Date.now();
     const errors: string[] = [];
-    if (session.xiaochanHeaders) {
+    const scope = { radiusMeters: COMPARISON_RADIUS_METERS };
+    if (syncXiaochan) {
       try {
         session.offers.xiaochan = await fetchXiaochan(
-          session.xiaochanHeaders,
+          session.xiaochanHeaders!,
           session.location,
+          scope,
         );
         session.updatedAt.xiaochan = new Date().toISOString();
+        const label = isXiaochanGuest(session.xiaochanHeaders!)
+          ? "访客访问" : "会话可访问";
         session.connections.xiaochan = {
           state: "configured",
-          label: "会话可访问",
+          label,
           updatedAt: session.updatedAt.xiaochan,
-          message: "会话可访问",
+          message: label,
         };
       } catch (error: any) {
         errors.push(error.statusMessage || error.message || "小蚕同步失败");
@@ -54,12 +70,29 @@ export default defineEventHandler(async (event) => {
           };
       }
     }
-    if (session.connections.meituan.state === "connected") {
+    if (syncWaimai) {
       try {
-        session.offers.meituan = await fetchMeituan(id, session.location);
-        session.updatedAt.meituan = new Date().toISOString();
+        session.offers.waimai = await fetchWaimai(session.waimaiToken!, session.location, fetch, scope);
+        session.updatedAt.waimai = new Date().toISOString();
+        session.connections.waimai = {
+          state: "configured",
+          label: session.waimaiToken ? "会话可访问" : "访客访问",
+          updatedAt: session.updatedAt.waimai,
+        };
       } catch (error: any) {
-        errors.push(error.statusMessage || "美团同步失败，请查看官方窗口");
+        errors.push(error.statusMessage || "歪麦同步失败");
+        if (error.statusCode === 401)
+          session.connections.waimai = { state: "expired", label: "会话失效", message: errors.at(-1) };
+      }
+    }
+    if (syncMeituan) {
+      try {
+        session.offers.meituan = await fetchMeituan(id, session.location, scope);
+        session.updatedAt.meituan = new Date().toISOString();
+        if (session.connections.meituan.state === "configured")
+          session.connections.meituan = { ...session.connections.meituan, state: "connected", message: "连接成功", updatedAt: session.updatedAt.meituan };
+      } catch (error: any) {
+        errors.push(error.statusMessage || "美团同步失败，请查看登录页面");
         if (error.statusCode === 401)
           session.connections.meituan = {
             state: "expired",

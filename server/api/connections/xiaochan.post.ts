@@ -5,7 +5,7 @@ import {
   withSessionLock,
   publicSession,
 } from "../../utils/session";
-import { parseXiaochanSession } from "../../utils/xiaochan";
+import { isXiaochanGuest, parseXiaochanSession } from "../../utils/xiaochan";
 
 export default defineEventHandler(async (event) => {
   const id = sessionId(event),
@@ -18,13 +18,13 @@ export default defineEventHandler(async (event) => {
   }
   return withSessionLock(id, async () => {
     const session = await loadSession(id);
+    const label = isXiaochanGuest(headers) ? "访客待验证" : "会话待验证";
     session.xiaochanHeaders = headers;
     session.connections.xiaochan = {
       state: "configured",
-      label: "会话待验证",
+      label,
       updatedAt: new Date().toISOString(),
-      message:
-        "会话待验证",
+      message: label,
     };
     session.offers.xiaochan = [];
     delete session.updatedAt.xiaochan;

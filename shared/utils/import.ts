@@ -1,4 +1,4 @@
-import type { Offer, Provider, RebateRule } from "../types";
+import type { Offer, Provider, RebateRule, ReviewBonus } from "../types";
 import { assertCents } from "./pricing";
 
 export function parseOffers(input: unknown, provider: Provider): Offer[] {
@@ -53,6 +53,39 @@ export function parseOffers(input: unknown, provider: Provider): Offer[] {
       (!Number.isInteger(row.inventory) || Number(row.inventory) < 0)
     )
       throw new Error("名额需要非负整数");
+    let reviewBonus: ReviewBonus | undefined;
+    if (row.reviewBonus !== undefined) {
+      const bonus = row.reviewBonus as ReviewBonus;
+      if (
+        provider !== "meituan" ||
+        !bonus ||
+        !Number.isInteger(bonus.ratioBps) ||
+        bonus.ratioBps < 0 ||
+        bonus.ratioBps > 10_000
+      )
+        throw new Error("评价加返比例无效");
+      reviewBonus = {
+        ratioBps: bonus.ratioBps,
+        capCents: assertCents(bonus.capCents),
+      };
+    }
+    let product: Offer["product"];
+    if (row.product !== undefined) {
+      const value = row.product as Offer["product"];
+      if (
+        !value ||
+        typeof value.name !== "string" ||
+        !value.name.trim() ||
+        value.name.length > 200
+      )
+        throw new Error("指定商品名称无效");
+      product = {
+        name: value.name.trim(),
+        ...(value.priceCents === undefined
+          ? {}
+          : { priceCents: assertCents(value.priceCents) }),
+      };
+    }
     if (
       row.distanceMeters !== undefined &&
       (!Number.isFinite(row.distanceMeters) || Number(row.distanceMeters) < 0)
@@ -69,12 +102,26 @@ export function parseOffers(input: unknown, provider: Provider): Offer[] {
       )
         throw new Error("活动时间需要 HH:mm 格式");
     }
+    for (const key of ["validFrom", "validUntil"]) {
+      if (
+        row[key] !== undefined &&
+        (typeof row[key] !== "string" || !Number.isFinite(Date.parse(row[key])))
+      )
+        throw new Error("活动有效期需要有效日期");
+    }
+    if (
+      row.validFrom && row.validUntil &&
+      Date.parse(String(row.validUntil)) <= Date.parse(String(row.validFrom))
+    )
+      throw new Error("活动结束时间需晚于开始时间");
     const poi = text("meituanPoiId");
     return {
       id: `${provider}:${row.id}`,
       provider,
       name: row.name.trim(),
       rule: validRule,
+      reviewBonus,
+      product,
       category: text("category") || "其他",
       address: text("address"),
       meituanPoiId:
@@ -85,6 +132,8 @@ export function parseOffers(input: unknown, provider: Provider): Offer[] {
       distanceMeters: row.distanceMeters as number | undefined,
       startTime: text("startTime"),
       endTime: text("endTime"),
+      validFrom: text("validFrom"),
+      validUntil: text("validUntil"),
       requirement: text("requirement") || "请查看官方活动要求",
       collectedAt: new Date().toISOString(),
       source: "import",

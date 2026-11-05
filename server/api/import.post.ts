@@ -1,4 +1,5 @@
 import { parseOffers } from "../../shared/utils/import";
+import { providers, type Provider } from "../../shared/types";
 import {
   loadSession,
   saveSession,
@@ -10,9 +11,9 @@ import {
 export default defineEventHandler(async (event) => {
   const id = sessionId(event),
     body = await readBody(event);
-  if (!body || !["xiaochan", "meituan"].includes(body.provider))
+  if (!body || !providers.includes(body.provider))
     throw createError({ statusCode: 400, statusMessage: "请选择导入平台" });
-  const provider: "xiaochan" | "meituan" = body.provider;
+  const provider: Provider = body.provider;
   let offers;
   try {
     offers = parseOffers(body.offers, provider);

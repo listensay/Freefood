@@ -14,6 +14,8 @@ export default defineEventHandler(async (event) => {
     typeof body.label !== "string" ||
     !body.label.trim() ||
     body.label.length > 100 ||
+    (body.cityName !== undefined &&
+      (typeof body.cityName !== "string" || body.cityName.length > 50)) ||
     !Number.isFinite(body.latitude) ||
     body.latitude < -90 ||
     body.latitude > 90 ||
@@ -22,7 +24,8 @@ export default defineEventHandler(async (event) => {
     body.longitude > 180 ||
     !Number.isInteger(body.cityCode) ||
     body.cityCode < 100000 ||
-    body.cityCode > 999999
+    body.cityCode > 999999 ||
+    (body.automatic !== undefined && typeof body.automatic !== "boolean")
   )
     throw createError({
       statusCode: 400,
@@ -30,14 +33,18 @@ export default defineEventHandler(async (event) => {
     });
   return withSessionLock(id, async () => {
     const session = await loadSession(id);
+    const firstAutomaticLocation = body.automatic === true && !session.location;
     session.location = {
       label: body.label.trim(),
       latitude: body.latitude,
       longitude: body.longitude,
       cityCode: body.cityCode,
+      cityName: body.cityName?.trim() || undefined,
     };
-    session.offers = { xiaochan: [], meituan: [] };
-    session.updatedAt = {};
+    if (!firstAutomaticLocation) {
+      session.offers = { xiaochan: [], waimai: [], meituan: [] };
+      session.updatedAt = {};
+    }
     await saveSession(id, session);
     return publicSession(session);
   });

@@ -1,4 +1,16 @@
-export type Provider = "xiaochan" | "meituan";
+export type Provider = "xiaochan" | "waimai" | "meituan";
+export type BawangcanProvider = Exclude<Provider, "meituan">;
+export const providers = ["xiaochan", "waimai", "meituan"] as const;
+export const providerNames: Record<Provider, string> = {
+  xiaochan: "小蚕霸王餐",
+  waimai: "歪麦霸王餐",
+  meituan: "美团试吃官",
+};
+export const providerShortNames: Record<Provider, string> = {
+  xiaochan: "小蚕",
+  waimai: "歪麦",
+  meituan: "美团",
+};
 export type RebateRule =
   | { kind: "fixed"; thresholdCents: number; cashbackCents: number }
   | {
@@ -7,6 +19,15 @@ export type RebateRule =
       ratioBps: number;
       capCents: number;
     };
+
+export interface ReviewBonus {
+  ratioBps: number;
+  capCents: number;
+}
+
+export interface SyncScope {
+  radiusMeters: number;
+}
 
 export interface Offer {
   id: string;
@@ -21,8 +42,12 @@ export interface Offer {
   inventory?: number;
   startTime?: string;
   endTime?: string;
+  validFrom?: string;
+  validUntil?: string;
   requirement: string;
   rule: RebateRule;
+  reviewBonus?: ReviewBonus;
+  product?: { name: string; priceCents?: number };
   url?: string;
   collectedAt: string;
   source: "live" | "import";
@@ -30,15 +55,21 @@ export interface Offer {
 
 export interface StoreMatch {
   id: string;
-  xiaochan: Offer;
+  bawangcan: Offer;
   meituan: Offer;
   confidence: "id" | "name" | "candidate";
   reason: string;
 }
 
+export interface StoreMatchGroup {
+  id: string;
+  matches: StoreMatch[];
+}
+
 export interface LocationSettings {
   label: string;
   cityCode: number;
+  cityName?: string;
   latitude: number;
   longitude: number;
 }
@@ -56,3 +87,16 @@ export interface DashboardData {
   offers: Record<Provider, Offer[]>;
   updatedAt: Partial<Record<Provider, string>>;
 }
+
+export interface RemoteLoginSession {
+  token: string;
+  viewport: { width: number; height: number };
+  expiresAt: string;
+}
+
+export type RemoteBrowserAction =
+  | { type: "pointer"; phase: "down" | "move" | "up"; x: number; y: number }
+  | { type: "text"; text: string }
+  | { type: "key"; key: string }
+  | { type: "wheel"; deltaX: number; deltaY: number }
+  | { type: "reload" };

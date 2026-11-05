@@ -5,13 +5,15 @@
   "scripts": {
     "build": "nuxt build",
     "dev": "nuxt dev --host 127.0.0.1",
+    "dev:lan": "FOOD_ALLOW_LAN=1 nuxt dev --host 0.0.0.0",
     "generate": "nuxt generate",
     "preview": "nuxt preview",
     "postinstall": "nuxt prepare",
-    "test": "tsx --test tests/core.test.ts",
+    "test": "tsx --test tests/core.test.ts tests/waimai.test.ts tests/network.test.ts tests/remote-input.test.ts tests/meituan-session.test.ts",
     "typecheck": "nuxt typecheck",
-    "test:integration": "npm run build && tsx --test tests/api.test.ts",
+    "test:integration": "npm run build && tsx --test tests/api.test.ts tests/lan.test.ts tests/remote.test.ts && tsx --test tests/dev-lan.test.ts",
     "start": "HOST=127.0.0.1 node .output/server/index.mjs",
+    "start:lan": "FOOD_ALLOW_LAN=1 HOST=0.0.0.0 node .output/server/index.mjs",
     "format": "prettier --write app shared server tests nuxt.config.ts package.json"
   },
   "dependencies": {

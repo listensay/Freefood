@@ -1,4 +1,5 @@
-import type { Offer, RebateRule } from "../types";
+import type { Offer, RebateRule, ReviewBonus } from "../types";
+import { providerShortNames } from "../types";
 
 export function assertCents(value: number): number {
   if (!Number.isSafeInteger(value) || value < 0 || value > 100_000_000) {
@@ -31,6 +32,16 @@ export function rebateFor(rule: RebateRule, eligibleCents: number): number {
 }
 
 export function activeAt(offer: Offer, now = new Date()): boolean {
+  if (
+    offer.validFrom &&
+    (!Number.isFinite(Date.parse(offer.validFrom)) || now.getTime() < Date.parse(offer.validFrom))
+  )
+    return false;
+  if (
+    offer.validUntil &&
+    (!Number.isFinite(Date.parse(offer.validUntil)) || now.getTime() >= Date.parse(offer.validUntil))
+  )
+    return false;
   const day = (date: Date) =>
     new Intl.DateTimeFormat("en-CA", {
       timeZone: "Asia/Shanghai",
@@ -73,48 +84,103 @@ export function activeAt(offer: Offer, now = new Date()): boolean {
     : current >= start || current < end;
 }
 
-export function calculatePrice(input: {
+type PriceInput = {
   paidCents: number;
   excludedFeesCents?: number;
-  xiaochan: Offer;
   meituan: Offer;
-  couponUsed?: boolean;
+  includeReviewBonus?: boolean;
+  productConfirmed?: boolean;
   sameStoreConfirmed?: boolean;
   stackingConfirmed?: boolean;
   now?: Date;
-}) {
+} & (
+  | { bawangcan: Offer; xiaochan?: never }
+  | { xiaochan: Offer; bawangcan?: never }
+);
+
+export function calculatePrice(input: PriceInput) {
+  return priceFor(input, "current");
+}
+
+export function estimatePrice(input: PriceInput) {
+  return priceFor(input, "rules");
+}
+
+function priceFor(input: PriceInput, availability: "current" | "rules") {
+  const bawangcan = input.bawangcan ?? input.xiaochan;
+  if (bawangcan.provider === "meituan") throw new Error("请选择霸王餐活动");
+  const name = providerShortNames[bawangcan.provider];
   const paid = assertCents(input.paidCents);
   const fees = assertCents(input.excludedFeesCents ?? 0);
   if (fees > paid) throw new Error("不计返现费用不能超过实付金额");
   const eligible = paid - fees;
-  const xActive = activeAt(input.xiaochan, input.now);
+  const xActive = activeAt(bawangcan, input.now);
   const mActive = activeAt(input.meituan, input.now);
-  const x = xActive ? rebateFor(input.xiaochan.rule, eligible) : 0;
-  const m =
-    mActive && !input.couponUsed ? rebateFor(input.meituan.rule, eligible) : 0;
+  // Rule quotes stay comparable before the activity starts; current eligibility still supplies warnings.
+  const xEligible = availability === "rules" || xActive;
+  const mEligible = availability === "rules" || mActive;
+  const x = xEligible ? rebateFor(bawangcan.rule, eligible) : 0;
+  const mBase = mEligible ? rebateFor(input.meituan.rule, eligible) : 0;
+  const bonus = input.meituan.reviewBonus;
+  const mReview =
+    bonus &&
+    mEligible &&
+    input.includeReviewBonus !== false &&
+    eligible >= input.meituan.rule.thresholdCents
+      ? rebateFor({ kind: "percentage", thresholdCents: 0, ...bonus }, eligible)
+      : 0;
+  const m = mBase + mReview;
+  const balance = x + m - paid;
   const warnings: string[] = [];
-  if (eligible < input.xiaochan.rule.thresholdCents)
-    warnings.push("未达到小蚕返现门槛");
+  if (eligible < bawangcan.rule.thresholdCents)
+    warnings.push(`未达到${name}返现门槛`);
   if (eligible < input.meituan.rule.thresholdCents)
     warnings.push("未达到美团返现门槛");
-  if (!xActive) warnings.push("小蚕活动当前不可用");
+  if (!xActive) warnings.push(`${name}活动当前不可用`);
   if (!mActive) warnings.push("美团活动当前不可用");
-  if (input.couponUsed)
-    warnings.push("使用活动页优惠券，美团返现不适用");
   if (!input.sameStoreConfirmed) warnings.push("分店待确认");
-  if (!input.stackingConfirmed)
-    warnings.push("叠加条件待确认");
+  if (!input.stackingConfirmed) warnings.push("叠加条件待确认");
+  if (bawangcan.product && !input.productConfirmed)
+    warnings.push("指定商品待确认");
   return {
     paidCents: paid,
     eligibleCents: eligible,
-    xiaochanCents: x,
+    bawangcanCents: x,
+    xiaochanCents: bawangcan.provider === "xiaochan" ? x : 0,
+    waimaiCents: bawangcan.provider === "waimai" ? x : 0,
     meituanCents: m,
+    meituanBaseCents: mBase,
+    meituanReviewCents: mReview,
     totalRebateCents: x + m,
+    balanceCents: balance,
     theoreticalNetCents: paid - x - m,
     singlePlatformNetCents: paid - Math.max(x, m),
     confirmedNetCents:
-      input.sameStoreConfirmed && input.stackingConfirmed ? paid - x - m : null,
+      input.sameStoreConfirmed &&
+      input.stackingConfirmed &&
+      (!bawangcan.product || input.productConfirmed)
+        ? paid - x - m
+        : null,
     warnings,
+  };
+}
+
+export function reviewBonusLabel(bonus: ReviewBonus): string {
+  return `评价加返 ${bonus.ratioBps / 100}% · 最高 ${money(bonus.capCents)}`;
+}
+
+export function suggestedPaidCents(bawangcan: Offer): number {
+  return Math.max(
+    bawangcan.rule.thresholdCents,
+    bawangcan.product?.priceCents ?? 0,
+  );
+}
+
+export function priceOutcome(balanceCents: number) {
+  return {
+    kind: balanceCents > 0 ? "income" : balanceCents < 0 ? "expense" : "balanced",
+    label: balanceCents > 0 ? "预计收益" : balanceCents < 0 ? "预计支出" : "收支平衡",
+    amountCents: Math.abs(balanceCents),
   };
 }
 
