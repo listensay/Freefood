@@ -208,6 +208,7 @@ code {
   font-size: 25px;
   font-weight: 600;
   white-space: nowrap;
+  text-decoration: none;
 }
 .brand-mark {
   width: 42px;
@@ -222,7 +223,7 @@ code {
   align-self: stretch;
   gap: var(--spacing-xl);
 }
-.main-nav > button {
+.main-nav > a {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -232,15 +233,16 @@ code {
   font-size: 14px;
   white-space: nowrap;
   transition: color 160ms ease;
+  text-decoration: none;
 }
-.main-nav > button:hover {
+.main-nav > a:hover {
   color: var(--color-ink);
 }
-.main-nav > button.active {
+.main-nav > a.active {
   color: var(--color-primary-active);
   font-weight: 600;
 }
-.main-nav > button.active::after {
+.main-nav > a.active::after {
   content: "";
   position: absolute;
   left: 0;
@@ -456,8 +458,6 @@ code {
 }
 .text-button:hover:not(:disabled) {
   background: var(--color-surface-soft);
-  text-decoration: underline;
-  text-underline-offset: 4px;
 }
 .text-button:disabled {
   color: var(--color-muted);
@@ -807,6 +807,7 @@ code {
 }
 .price-assumption {
   display: none;
+  margin-inline-start: 8px;
 }
 .net-price > strong {
   font-variant-numeric: tabular-nums;
@@ -822,6 +823,100 @@ code {
 .net-price small {
   font-size: 16px;
   font-weight: 500;
+}
+.enrollment-button,
+.enrollment-action-button {
+  font-size: 14px;
+  padding-inline: 16px;
+  min-height: 36px;
+  padding-block: 8px;
+}
+.enrollment-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.card-bottom:has(.enrollment-actions) {
+  flex-wrap: wrap;
+  row-gap: 12px;
+}
+.scheduled-enrollments {
+  margin-bottom: var(--spacing-lg);
+  border: 1px solid var(--color-hairline-soft);
+  border-radius: var(--radius-sm);
+  background: var(--color-canvas);
+}
+.scheduled-enrollment {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 8px 16px;
+  font-size: 13px;
+}
+.scheduled-enrollment > span:first-child {
+  flex: 1;
+  min-width: 120px;
+}
+.scheduled-enrollment time {
+  color: var(--color-muted);
+}
+.schedule-failed {
+  color: var(--color-primary-error-text);
+}
+.schedule-activity-name {
+  margin: 0 0 16px;
+}
+.schedule-time-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 14px;
+}
+.location-dialog.schedule-dialog {
+  overflow: visible;
+}
+.schedule-time-heading > span:last-child {
+  color: var(--color-muted);
+  font-size: 12px;
+}
+.time-picker {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+.time-picker > div {
+  flex: 1;
+  min-width: 0;
+}
+.time-picker > div > span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--color-muted);
+  font-size: 12px;
+}
+.time-picker .ui-select {
+  width: 100%;
+  min-width: 0;
+}
+.time-picker .ui-select-trigger {
+  width: 100%;
+  min-height: 48px;
+  padding: 10px 12px;
+  font-variant-numeric: tabular-nums;
+}
+.time-picker .ui-select-menu {
+  max-height: 240px;
+  overflow-y: auto;
+}
+.time-separator {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  color: var(--color-muted);
 }
 .empty-state {
   background: var(--color-canvas);
@@ -851,7 +946,7 @@ code {
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  background: var(--color-surface-soft);
+  background: var(--color-canvas);
   color: var(--color-ink);
   border: 1px solid var(--color-hairline-soft);
   border-radius: var(--radius-sm);
@@ -923,23 +1018,45 @@ code {
   font-size: 14px;
   margin-bottom: var(--spacing-base);
 }
-.account-panel > label,
-.meituan-session-import label {
-  display: block;
-  font-size: 14px;
-  color: var(--color-ink);
-  margin: 0 0 8px;
+.account-profile {
+  display: flex;
+  align-items: start;
+  gap: 12px;
+  margin-bottom: var(--spacing-lg);
 }
-.account-panel textarea {
-  padding: 10px 12px;
+.account-avatar {
+  display: grid;
+  place-items: center;
+  flex: 0 0 48px;
+  width: 48px;
+  height: 48px;
+  overflow: hidden;
+  border-radius: var(--radius-full);
+  background: var(--color-surface-soft);
+  color: var(--color-muted);
+}
+.account-avatar img {
   width: 100%;
-  resize: vertical;
-  height: 132px;
-  min-height: 112px;
-  font-size: 14px;
+  height: 100%;
+  object-fit: cover;
+}
+.account-profile dl {
+  min-width: 0;
+  margin: 0;
+  font-size: 13px;
   line-height: 1.5;
-  margin-bottom: 16px;
-  display: block;
+}
+.account-profile dl > div {
+  display: flex;
+  gap: 8px;
+}
+.account-profile dt {
+  flex-shrink: 0;
+  color: var(--color-muted);
+}
+.account-profile dd {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 .account-panel .button {
   padding-inline: 12px;
@@ -947,39 +1064,6 @@ code {
 }
 .verify-button {
   margin-top: 12px;
-}
-.meituan-session-import {
-  margin-top: var(--spacing-lg);
-  padding-top: var(--spacing-lg);
-  border-top: 1px solid var(--color-hairline-soft);
-}
-.meituan-session-import summary {
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 40px;
-  font-size: 14px;
-  font-weight: 600;
-  list-style: none;
-  border-radius: var(--radius-sm);
-}
-.meituan-session-import summary::-webkit-details-marker {
-  display: none;
-}
-.meituan-session-import summary::marker {
-  content: "";
-}
-.meituan-session-import summary:focus-visible {
-  outline: 2px solid var(--color-primary-active);
-  outline-offset: 4px;
-}
-.meituan-session-import[open] summary svg {
-  transform: rotate(180deg);
-}
-.meituan-session-import .text-button {
-  margin: 8px 0 16px;
-  padding-left: 0;
 }
 .visually-hidden {
   position: absolute;
@@ -1041,76 +1125,6 @@ dialog[open] {
 }
 .icon-button:hover {
   background: var(--color-surface-strong);
-}
-.remote-login-dialog {
-  width: min(560px, calc(100vw - 32px));
-  max-height: calc(100dvh - 32px);
-  border-radius: var(--radius-lg);
-  overflow: auto;
-}
-.remote-login-content {
-  padding: var(--spacing-lg);
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-.remote-browser-surface {
-  width: min(480px, calc((100dvh - 260px) * 480 / 680));
-  max-width: 100%;
-  margin-inline: auto;
-  border: 1px solid var(--color-hairline);
-  border-radius: var(--radius-sm);
-  background: var(--color-canvas);
-  touch-action: none;
-  user-select: none;
-  overflow: hidden;
-}
-.remote-browser-surface img {
-  width: 100%;
-  height: 100%;
-  display: block;
-  pointer-events: none;
-}
-.remote-login-content.has-login-issue .remote-browser-surface {
-  width: min(480px, calc((100dvh - 380px) * 480 / 680));
-}
-.remote-browser-surface.inactive {
-  opacity: 0.6;
-  pointer-events: none;
-}
-.remote-login-placeholder {
-  min-height: 260px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  color: var(--color-muted);
-}
-.remote-login-error {
-  margin: 0;
-}
-.remote-text-entry {
-  display: flex;
-  gap: 12px;
-}
-.remote-text-entry input {
-  min-width: 0;
-  flex: 1;
-}
-.remote-text-entry .button {
-  font-size: 14px;
-}
-.remote-login-actions {
-  display: flex;
-  gap: 8px;
-}
-.remote-login-actions .primary {
-  margin-left: auto;
-  flex: 1;
-  font-size: 14px;
-}
-.remote-login-actions .secondary {
-  padding-inline: 12px;
 }
 .coordinate-fields {
   display: grid;
@@ -1183,10 +1197,10 @@ dialog[open] {
     justify-content: center;
     gap: 24px;
   }
-  .main-nav > button {
+  .main-nav > a {
     gap: 6px;
   }
-  .main-nav > button svg {
+  .main-nav > a svg {
     width: 18px;
   }
   .location-button span {
@@ -1285,11 +1299,11 @@ dialog[open] {
     gap: 12px;
     min-height: 52px;
   }
-  .main-nav > button {
+  .main-nav > a {
     font-size: 13px;
     gap: 5px;
   }
-  .main-nav > button svg {
+  .main-nav > a svg {
     width: 16px;
   }
   .main-content {
@@ -1413,10 +1427,7 @@ dialog[open] {
     height: 40px;
     font-size: 22px;
   }
-  .account-panel textarea {
-    font-size: 16px;
-  }
-  .location-dialog {
+    .location-dialog {
     max-height: calc(100dvh - 32px);
     border-radius: var(--radius-lg);
   }
@@ -1425,23 +1436,6 @@ dialog[open] {
   }
   .coordinate-fields {
     gap: 12px;
-  }
-  .remote-login-dialog {
-    width: calc(100vw - 24px);
-  }
-  .remote-login-content {
-    padding: 20px;
-    gap: 12px;
-  }
-  .remote-login-actions {
-    gap: 6px;
-  }
-  .remote-login-actions .secondary {
-    padding-inline: 10px;
-  }
-  .remote-login-actions .primary {
-    padding-inline: 10px;
-    font-size: 13px;
   }
 }
 @media (max-width: 370px) {
@@ -1452,10 +1446,10 @@ dialog[open] {
   .main-nav {
     gap: 8px;
   }
-  .main-nav > button {
+  .main-nav > a {
     font-size: 12px;
   }
-  .main-nav > button svg {
+  .main-nav > a svg {
     display: none;
   }
   .location-button span {

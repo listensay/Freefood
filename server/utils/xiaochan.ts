@@ -1,151 +1,11 @@
-import { createHash, randomUUID } from "node:crypto";
 import { createError } from "h3";
 import type { LocationSettings, Offer, SyncScope } from "../../shared/types";
 import { safeUrl } from "../../shared/utils/import";
 import { collectActivityPages, type ActivityPage } from "./activity-pages";
 import { toCents } from "../../shared/utils/pricing";
+import { xiaochanAccountHeaders, xiaochanRequestHeaders, type XiaochanAccount } from "./xiaochan-rpc";
 
 const endpoint = "https://gw.xiaocantech.com/rpc";
-const md5 = (text: string) => createHash("md5").update(text).digest("hex");
-
-function shellWords(text: string): string[] {
-  const words: string[] = [];
-  let word = "",
-    quote = "",
-    started = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i]!;
-    if (quote) {
-      if (c === quote) quote = "";
-      else if (
-        c === "\\" &&
-        quote === '"' &&
-        ['"', "\\", "$", "`"].includes(text[i + 1] || "")
-      )
-        word += text[++i];
-      else word += c;
-    } else if (c === '"' || c === "'") {
-      quote = c;
-      started = true;
-    } else if (c === "\\") {
-      if (text[i + 1] !== "\n") {
-        word += text[++i] || "";
-        started = true;
-      } else i++;
-    } else if (/\s/.test(c)) {
-      if (started) {
-        words.push(word);
-        word = "";
-        started = false;
-      }
-    } else {
-      word += c;
-      started = true;
-    }
-  }
-  if (quote) throw new Error("cURL 引号不完整");
-  if (started) words.push(word);
-  return words;
-}
-
-export function parseXiaochanSession(input: unknown): Record<string, string> {
-  if (typeof input !== "string" || !input.trim() || input.length > 64_000)
-    throw new Error("请提供本人小蚕请求的请求头或 cURL");
-  const text = input.trim();
-  let raw: Record<string, unknown> = {};
-  if (text.startsWith("{")) {
-    const json = JSON.parse(text);
-    raw = json.headers ?? json;
-    if (!raw || typeof raw !== "object" || Array.isArray(raw))
-      throw new Error("请求头格式错误");
-  } else if (/^curl(?:\s|$)/.test(text)) {
-    const words = shellWords(text);
-    if (words[0] !== "curl") throw new Error("请粘贴有效的小蚕 cURL 请求");
-    const urls = words.filter((w) => /^https?:\/\//.test(w));
-    if (
-      !urls.some((w) => {
-        try {
-          const u = new URL(w);
-          return (
-            u.origin === "https://gw.xiaocantech.com" && u.pathname === "/rpc"
-          );
-        } catch {
-          return false;
-        }
-      })
-    )
-      throw new Error("仅接受 gw.xiaocantech.com/rpc 的小蚕请求");
-    for (let i = 1; i < words.length; i++) {
-      let header: string | undefined;
-      if (words[i] === "-H" || words[i] === "--header") header = words[++i];
-      else if (words[i]?.startsWith("--header=")) header = words[i]!.slice(9);
-      if (header) {
-        const colon = header.indexOf(":");
-        if (colon > 0)
-          raw[header.slice(0, colon)] = header.slice(colon + 1).trim();
-      }
-    }
-  } else {
-    if (/^https?:\/\//i.test(text))
-      throw new Error("网址不包含登录会话，请复制请求头或 cURL");
-    for (const source of text.split(/\r?\n/)) {
-      // Captured headers may have Markdown escapes and trailing line breaks.
-      const line = source.trim().replace(/\\$/, "").trim();
-      if (!line) continue;
-      const match = /^(:?[a-zA-Z0-9!#$%&'*+.^_`|~-]+):\s*(.*)$/.exec(line);
-      if (!match) throw new Error("请求头格式错误");
-      const name = match[1]!.toLowerCase();
-      if (Object.hasOwn(raw, name)) throw new Error("请求头不能重复");
-      raw[name] = match[2]!;
-    }
-    for (const name of [":authority", ":path", ":scheme", "referer"]) {
-      if (typeof raw[name] === "string")
-        raw[name] = raw[name].replace(/\\([.:/])/g, "$1");
-    }
-    if (
-      (raw[":authority"] !== undefined &&
-        raw[":authority"] !== "gw.xiaocantech.com") ||
-      (raw[":path"] !== undefined && raw[":path"] !== "/rpc") ||
-      (raw[":scheme"] !== undefined && raw[":scheme"] !== "https")
-    )
-      throw new Error("仅接受 gw.xiaocantech.com/rpc 的小蚕请求");
-  }
-  const headers: Record<string, string> = {};
-  for (const [key, value] of Object.entries(raw)) {
-    const name = key.toLowerCase();
-    if (
-      /^x-[a-z0-9-]+$/.test(name) ||
-      ["authorization", "cookie", "version", "user-agent", "referer", "xweb_xhr"].includes(name)
-    ) {
-      if (
-        typeof value !== "string" ||
-        /[\r\n]/.test(value) ||
-        value.length > 16000
-      )
-        throw new Error("请求头格式错误");
-      headers[name] = value;
-    }
-  }
-  if (
-    !/^\d+$/.test(headers["x-teemo"] || "") ||
-    !/^\d+$/.test(headers["x-vayne"] || "") ||
-    headers["x-teemo"]!.length > 12
-  )
-    throw new Error("会话缺少登录字段，请重新复制小程序请求");
-  const guestDevice = /^0+$/.test(headers["x-teemo"]!);
-  const guestUser = /^0+$/.test(headers["x-vayne"]!);
-  if (guestDevice !== guestUser)
-    throw new Error("会话身份字段不完整，请重新复制小程序请求");
-  if (guestDevice) {
-    headers["x-teemo"] = "0";
-    headers["x-vayne"] = "0";
-  }
-  return headers;
-}
-
-export function isXiaochanGuest(headers: Record<string, string>): boolean {
-  return headers["x-teemo"] === "0" && headers["x-vayne"] === "0";
-}
 
 function cents(value: unknown): number {
   const n = Number(value);
@@ -300,32 +160,22 @@ async function fetchXiaochanPage(
   location: LocationSettings,
   offset: number,
   scope?: SyncScope,
-): Promise<ActivityPage> {
+  pagePvId?: string,
+): Promise<ActivityPage & { nextPvId?: string }> {
   const service = "SilkwormFusion",
     method = "FusionService.GetFeedPromotions";
-  const timestamp = String(Date.now()),
-    identity = headers["x-teemo"]!;
-  const uuid = randomUUID().replaceAll("-", "");
-  // X-Nami is 16 characters: four hex digits, the device ID, then the suffix.
-  const nami = `${uuid.slice(0, 4)}${identity}${uuid.slice(4, 16 - identity.length)}`;
+  const identity = headers["x-teemo"]!;
   const outgoing = {
-    ...headers,
-    serverName: service,
-    methodName: method,
-    version: headers.version || headers["x-version"] || "3.21.7.82",
-    "x-version": headers["x-version"] || headers.version || "3.21.7.82",
-    "x-nami": nami,
-    "x-garen": timestamp,
-    "x-ashe": md5(md5(`${service}.${method}`.toLowerCase()) + timestamp + nami),
-    "x-city": String(location.cityCode),
-    "x-app-sr": "20",
+    ...xiaochanRequestHeaders(headers, service, method, location),
+    "x-app-sr": headers["x-platform"] === "Android" ? "16" : "20",
     "x-platform": headers["x-platform"] || "mini",
-    xweb_xhr: headers.xweb_xhr || "1",
+    ...(headers["x-platform"] === "Android" ? {} : { xweb_xhr: headers.xweb_xhr || "1" }),
     "content-type": "application/json",
   };
   let response: Response;
   try {
-    response = await fetch(endpoint, {
+    response = await fetch(headers["x-platform"] === "Android"
+      ? "https://gw.xiaocantech.com/g/pa" : endpoint, {
       method: "POST",
       headers: outgoing,
       redirect: "error",
@@ -339,7 +189,8 @@ async function fetchXiaochanPage(
         sort: 0,
         scene: 1,
         is_show_mt: true,
-        app_id: 20,
+        ...(headers["x-platform"] === "Android" ? {} : { app_id: 20 }),
+        ...(headers["x-platform"] === "Android" && pagePvId ? { page_pv_id: pagePvId } : {}),
       }),
     });
   } catch {
@@ -354,7 +205,7 @@ async function fetchXiaochanPage(
       statusCode: response.status === 401 ? 401 : 502,
       statusMessage:
         response.status === 401
-          ? "小蚕会话无效，请重新导入"
+          ? "小蚕登录已失效，请重新登录"
           : gatewayBlocked
             ? "小蚕网关拦截，请检查网络连接"
             : response.status === 403
@@ -389,9 +240,9 @@ async function fetchXiaochanPage(
     throw createError({
       statusCode: expired ? 401 : 502,
       statusMessage: expired
-        ? "小蚕会话无效，请重新导入"
+        ? "小蚕登录已失效，请重新登录"
         : /签名|signature|x-ashe|x-nami/i.test(message)
-          ? "小蚕请求校验失败，请重新导入会话"
+          ? "小蚕请求校验失败，请重新登录"
           : Number(status.code) === 429
             ? "小蚕请求频繁，请稍后重试"
             : "小蚕活动请求失败，请稍后重试",
@@ -411,17 +262,31 @@ async function fetchXiaochanPage(
     offers,
     rowKeys: rows.map((row: any) => `${row.source}:${row.store_platform}:${row.promotion_id || row.wm_poi_id || row.store_id || row.store?.id || row.name}`),
     hasMore: rows.length > 0 && data.has_more !== false,
+    nextPvId: typeof data.next_pv_id === "string" && data.next_pv_id
+      ? data.next_pv_id
+      : rows.findLast((row: any) => typeof row.page_pv_id === "string" && row.page_pv_id)?.page_pv_id,
   };
 }
 
 export async function fetchXiaochan(
-  headers: Record<string, string>,
+  account: XiaochanAccount,
   location: LocationSettings,
   scope?: SyncScope,
 ): Promise<Offer[]> {
+  if (!account || !positiveId(account.silkId) || account.silkId.length > 12 ||
+    !Number.isSafeInteger(Number(account.silkId)) || !positiveId(account.userId) ||
+    !Number.isSafeInteger(Number(account.userId)) || !account.accessToken ||
+    (account.expiresAt !== undefined && account.expiresAt <= Date.now()))
+    throw createError({ statusCode: 401, statusMessage: "小蚕登录已失效，请重新登录" });
+  const headers = xiaochanAccountHeaders(account);
   if (!scope) return (await fetchXiaochanPage(headers, location, 0)).offers;
+  let pagePvId: string | undefined;
   return collectActivityPages(
-    page => fetchXiaochanPage(headers, location, page * 20, scope),
+    async page => {
+      const result = await fetchXiaochanPage(headers, location, page * 20, scope, pagePvId);
+      pagePvId = result.nextPvId;
+      return result;
+    },
     scope.radiusMeters,
   );
 }

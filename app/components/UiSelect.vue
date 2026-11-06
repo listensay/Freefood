@@ -35,7 +35,15 @@ async function open(edge?: "first" | "last") {
     opensAbove.value =
       spaceBelow < list.value.offsetHeight + 8 && bounds.top > spaceBelow;
   }
+  scrollActive();
   list.value?.focus({ preventScroll: true });
+}
+function scrollActive() {
+  const element = list.value?.children[activeIndex.value] as HTMLElement | undefined;
+  if (!element || !list.value || list.value.scrollHeight <= list.value.clientHeight) return;
+  if (element.offsetTop < list.value.scrollTop) list.value.scrollTop = element.offsetTop;
+  else if (element.offsetTop + element.offsetHeight > list.value.scrollTop + list.value.clientHeight)
+    list.value.scrollTop = element.offsetTop + element.offsetHeight - list.value.clientHeight;
 }
 function close(restoreFocus = false) {
   expanded.value = false;
@@ -51,6 +59,7 @@ function move(direction: number) {
   activeIndex.value =
     (activeIndex.value + direction + props.options.length) %
     props.options.length;
+  scrollActive();
 }
 function keydown(event: KeyboardEvent) {
   if (event.key === "Tab") {

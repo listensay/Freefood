@@ -29,6 +29,14 @@ export interface SyncScope {
   radiusMeters: number;
 }
 
+export interface EnrollmentSchedule {
+  offerId: string;
+  name: string;
+  runAt: string;
+  state: "scheduled" | "running" | "failed";
+  message?: string;
+}
+
 export interface Offer {
   id: string;
   provider: Provider;
@@ -51,6 +59,8 @@ export interface Offer {
   url?: string;
   collectedAt: string;
   source: "live" | "import";
+  enrollment?: { state: "enrolled" | "unknown" | "cancel-unknown"; orderId?: string };
+  enrollmentSchedule?: EnrollmentSchedule;
 }
 
 export interface StoreMatch {
@@ -74,11 +84,19 @@ export interface LocationSettings {
   longitude: number;
 }
 
+export interface AccountProfile {
+  userId: string;
+  nickname?: string;
+  avatar?: string;
+  phone?: string;
+}
+
 export interface ConnectionStatus {
   state: "disconnected" | "configured" | "connected" | "expired" | "pending";
   label: string;
   updatedAt?: string;
   message?: string;
+  profile?: AccountProfile;
 }
 
 export interface DashboardData {
@@ -86,6 +104,7 @@ export interface DashboardData {
   connections: Record<Provider, ConnectionStatus>;
   offers: Record<Provider, Offer[]>;
   updatedAt: Partial<Record<Provider, string>>;
+  enrollmentSchedules?: EnrollmentSchedule[];
 }
 
 export interface RemoteLoginSession {

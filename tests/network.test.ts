@@ -214,3 +214,26 @@ test("only the private dev Unix socket can skip the peer check after the entry g
     }
   });
 });
+
+test("Computer WeChat connection remains loopback-only even when LAN mode is enabled", () => {
+  withLan(true, () => {
+    const at = (headers: Record<string, string>, peer = "127.0.0.1", path = "/api/connections/xiaochan/wechat") => {
+      const request = event({ "x-food-request": "1", ...headers }, peer, "POST");
+      request.node.req.url = path;
+      return request;
+    };
+    assertRequestAccess(at({ origin: "http://127.0.0.1:3000" }));
+    assertRequestAccess(at({ host: "localhost:3000", origin: "http://localhost:3000" }, "::1"));
+    for (const path of ["/api/connections/xiaochan/wechat", "/api/connections/xiaochan/wechat/", "/api/connections/xiaochan/%77echat",
+      "/api/connections/waimai/wechat", "/api/connections/waimai/wechat/", "/api/connections/waimai/%77echat",
+      "/api/connections/meituan/browser", "/api/connections/meituan/browser/", "/api/connections/meituan/%62rowser"]) {
+      assertRequestAccess(at({ origin: "http://127.0.0.1:3000" }, "127.0.0.1", path));
+      assert.throws(() => assertRequestAccess(at({ host: "192.168.1.20:3000", origin: "http://192.168.1.20:3000" }, "192.168.1.21", path)), { statusCode: 403 });
+      assert.throws(() => assertRequestAccess(at({ "x-forwarded-for": "127.0.0.1", "x-forwarded-host": "localhost:3000" }, "192.168.1.21", path)), { statusCode: 403 });
+      assert.throws(() => assertRequestAccess(at({ host: "192.168.1.20:3000", "x-forwarded-host": "localhost:3000" }, "127.0.0.1", path)), { statusCode: 403 });
+    }
+    assert.throws(() => assertRequestAccess(at({ origin: "https://evil.example" })), { statusCode: 403 });
+    assert.throws(() => assertRequestAccess(at({ "sec-fetch-site": "cross-site" })), { statusCode: 403 });
+    assert.throws(() => assertRequestAccess(at({ "x-food-request": "" })), { statusCode: 403 });
+  });
+});

@@ -5,8 +5,10 @@ import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
+import { writeChromeProfile } from "./fixtures/chrome-profile";
 
 const directory = await mkdtemp(join(tmpdir(), "food-remote-"));
+const chromeDirectory = await mkdtemp(join(tmpdir(), "food-remote-chrome-"));
 const port = 49000 + Math.floor(Math.random() * 8000);
 const base = `http://127.0.0.1:${port}`;
 const server = spawn(
@@ -23,6 +25,7 @@ const server = spawn(
       PORT: String(port),
       FOOD_ALLOW_LAN: "0",
       FOOD_DATA_DIR: directory,
+      FOOD_CHROME_DATA_DIR: chromeDirectory,
     },
     stdio: "pipe",
   },
@@ -265,58 +268,49 @@ try {
     assert.doesNotMatch(result.errors[0], /完成.*验证/);
     assert.equal(result.data.connections.meituan.state, "configured");
   });
-  await test("imported browser cookies stay encrypted and unverified until the official identity check succeeds", async () => {
-    const imported = (await fetch(base + "/api/dashboard")).headers
-      .get("set-cookie")!
-      .split(";")[0]!;
-    const response = await call(
-      "/api/connections/meituan/session",
-      imported,
-      undefined,
-      {
-        session:
-          '{"headers":{"Cookie":"remote-test-phone=13800000000; token=private-import-canary"}}',
-      },
-    );
-    assert.equal(response.status, 200);
-    const text = await response.text();
-    assert.ok(!text.includes("private-import-canary"));
-    assert.equal(JSON.parse(text).connections.meituan.state, "configured");
-    assert.equal(JSON.parse(text).connections.meituan.label, "会话待验证");
-    for (const name of (await readdir(directory)).filter((name) =>
-      name.endsWith(".enc"),
-    ))
-      assert.ok(
-        !(await readFile(join(directory, name))).includes(
-          Buffer.from("private-import-canary"),
-        ),
-      );
-    const verified = await call(
-      "/api/connections/meituan/verify",
-      imported,
-      undefined,
-      {},
-    );
-    assert.equal(verified.status, 200, await verified.clone().text());
-    assert.equal(
-      (await verified.json()).connections.meituan.state,
-      "connected",
-    );
-    assert.equal(
-      (
-        await call("/api/connections/meituan/session", imported, undefined, {
-          session: "bad\r\ncookie",
-        })
-      ).status,
-      400,
-    );
+  const chromeLogin = async (phone = "13800000000", profile = "Default") => writeChromeProfile(chromeDirectory, [
+    { name: "remote-test-phone", value: phone }, { name: "token", value: `private-chrome-canary-${phone}` },
+    { name: "unrelated", value: "private-foreign-canary", domain: "evil.example" },
+  ], profile);
+  await test("Chrome connects only after official identity verification and keeps credentials encrypted", async () => {
+    const imported = (await fetch(base + "/api/dashboard")).headers.get("set-cookie")!.split(";")[0]!;
+    await chromeLogin();
+    const response = await call("/api/connections/meituan/browser", imported, undefined, {});
+    assert.equal(response.status, 200, await response.clone().text());
+    const text = await response.text(), result = JSON.parse(text);
+    assert.equal(result.connections.meituan.state, "connected");
+    assert.equal(result.connections.meituan.label, "138****0000");
+    assert.ok(!text.includes("private-chrome-canary"));
+    assert.ok(!text.includes("private-foreign-canary"));
+    for (const name of (await readdir(directory)).filter(name => name.endsWith(".enc")))
+      assert.ok(!(await readFile(join(directory, name))).includes(Buffer.from("private-chrome-canary")));
+    await call("/api/import", imported, undefined, { provider: "meituan", offers: [{ id: "keep", name: "已保存门店", rule: { kind: "fixed", thresholdCents: 2500, cashbackCents: 500 } }] });
+    const reconnected = await call("/api/connections/meituan/browser", imported, undefined, {});
+    assert.equal(reconnected.status, 200);
+    assert.equal((await reconnected.json()).offers.meituan[0].id, "meituan:keep");
+    await chromeLogin("13900000000");
+    const failed = await call("/api/connections/meituan/browser", imported, undefined, {});
+    assert.equal(failed.status, 502);
+    const saved = await (await call("/api/dashboard", imported)).json();
+    assert.equal(saved.connections.meituan.state, "connected");
+    assert.equal(saved.offers.meituan[0].id, "meituan:keep");
+    assert.equal((await call("/api/connections/meituan/browser", imported, undefined, { session: "cookie" })).status, 400);
+    assert.equal((await call("/api/connections/meituan/session", imported, undefined, { session: "cookie" })).status, 404);
+    await chromeLogin("13700000000");
+    const switched = await call("/api/connections/meituan/browser", imported, undefined, {});
+    assert.equal(switched.status, 200);
+    assert.deepEqual((await switched.json()).offers.meituan, []);
+    await chromeLogin("13800000000", "Profile 1");
+    assert.equal((await call("/api/connections/meituan/browser", imported, undefined, {})).status, 409);
+    await rm(join(chromeDirectory, "Profile 1"), { recursive: true, force: true });
     const owner = await (await call("/api/dashboard", cookie)).json();
     assert.equal(owner.connections.meituan.state, "connected");
   });
   await test("Meituan radius sync signs each page with the official SDK, keeps earlier pages and reads capped review bonuses", async () => {
     await fetch(base + "/api/connections/meituan", { method: "DELETE", headers: { cookie, "x-food-request": "1" } });
     const imported = (await fetch(base + "/api/dashboard")).headers.get("set-cookie")!.split(";")[0]!;
-    await call("/api/connections/meituan/session", imported, undefined, { session: "remote-test-phone=13600000000" });
+    await chromeLogin("13600000000");
+    assert.equal((await call("/api/connections/meituan/browser", imported, undefined, {})).status, 200);
     await call("/api/location", imported, undefined, { label: "测试地址", cityCode: 310000, latitude: 31.23, longitude: 121.47 });
     const response = await call("/api/sync", imported, undefined, { provider: "xiaochan" });
     assert.equal(response.status, 200);
@@ -330,7 +324,8 @@ try {
   await test("Meituan pagination HTTP failures preserve saved activities and do not expose upstream response bodies", async () => {
     await fetch(base + "/api/connections/meituan", { method: "DELETE", headers: { cookie: other, "x-food-request": "1" } });
     const imported = (await fetch(base + "/api/dashboard")).headers.get("set-cookie")!.split(";")[0]!;
-    await call("/api/connections/meituan/session", imported, undefined, { session: "remote-test-phone=13500000000" });
+    await chromeLogin("13500000000");
+    assert.equal((await call("/api/connections/meituan/browser", imported, undefined, {})).status, 200);
     await call("/api/location", imported, undefined, { label: "测试地址", cityCode: 310000, latitude: 31.23, longitude: 121.47 });
     const existing = [{ id: "saved", name: "已保存门店", rule: { kind: "percentage", thresholdCents: 0, ratioBps: 3500, capCents: 1500 } }];
     const saved = await call("/api/import", imported, undefined, { provider: "meituan", offers: existing });
@@ -351,4 +346,5 @@ try {
   await once(server, "exit").catch(() => {});
   clearTimeout(timeout);
   await rm(directory, { recursive: true, force: true });
+  await rm(chromeDirectory, { recursive: true, force: true });
 }

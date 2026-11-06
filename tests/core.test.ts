@@ -14,16 +14,20 @@ import {
 import { groupStoreMatches, matchStores } from "../shared/utils/matching";
 import { parseOffers, csvCell } from "../shared/utils/import";
 import {
-  parseXiaochanSession,
   normalizeXiaochan,
   fetchXiaochan,
-  isXiaochanGuest,
 } from "../server/utils/xiaochan";
+import type { XiaochanAccount } from "../server/utils/xiaochan-rpc";
 import { addressFromGeocode, toGcj02 } from "../shared/utils/location";
 import { matchWithinRadius, offerWithinRadius } from "../shared/utils/scope";
 import { collectActivityPages } from "../server/utils/activity-pages";
 import { normalizeMeituan } from "../server/utils/meituan";
 
+const testXiaochanAccount = (changes: Partial<XiaochanAccount> = {}): XiaochanAccount => ({
+  silkId: "123456789", userId: "6789", accessToken: "private-test-token",
+  platform: "mini", version: "3.22.2.83", sessionId: "private-test-session",
+  ...changes,
+});
 const now = new Date("2026-11-04T04:00:00Z");
 const x: Offer = {
   id: "x1",
@@ -518,62 +522,6 @@ test("CSV protects against spreadsheet formula injection", () => {
   assert.equal(csvCell('=HYPERLINK("x")'), '"\'=HYPERLINK(""x"")"');
   assert.equal(csvCell("-3.75"), '"\'-3.75"');
 });
-test("Xiaochan session parses cURL without executing commands or using repository account", () => {
-  const curl = `curl 'https://gw.xiaocantech.com/rpc' \\\n-H 'X-Teemo: 123456' -H 'X-Vayne: 6789' -H 'X-Version: 3.21' -H 'Host: evil.example' --data-raw '{"value":"$(touch /tmp/should-not-exist)"}'`;
-  const headers = parseXiaochanSession(curl);
-  assert.equal(headers["x-teemo"], "123456");
-  assert.equal(headers["x-vayne"], "6789");
-  assert.equal(headers.host, undefined);
-  assert.throws(() =>
-    parseXiaochanSession(
-      `curl 'https://evil.example/rpc' -H 'X-Teemo: 123' -H 'X-Vayne: 456'`,
-    ),
-  );
-  assert.throws(() => parseXiaochanSession('{"x-teemo":"1"}'));
-  assert.throws(() =>
-    parseXiaochanSession(
-      '{"x-teemo":"1","x-vayne":"2","authorization":"abc\\r\\nInjected: 1"}',
-    ),
-  );
-});
-test("Xiaochan accepts explicitly captured zero-valued guest identities in every session format", () => {
-  const guestHeaders = {
-    ":method": "POST",
-    ":authority": "gw.xiaocantech.com",
-    ":path": "/rpc",
-    ":scheme": "https",
-    "content-length": "138",
-    "x-teemo": "0",
-    "x-vayne": "0",
-    "x-session-id": "synthetic-guest-session",
-    "x-version": "3.22.2.83",
-    xweb_xhr: "1",
-  };
-  for (const input of [
-    JSON.stringify(guestHeaders),
-    JSON.stringify({ headers: guestHeaders }),
-    Object.entries(guestHeaders).map(([name, value]) => `${name}: ${value}`).join("\n"),
-    "curl 'https://gw.xiaocantech.com/rpc' -H 'X-Teemo: 0' -H 'X-Vayne: 0' -H 'X-Session-Id: synthetic-guest-session'",
-  ]) {
-    const headers = parseXiaochanSession(input);
-    assert.equal(headers["x-teemo"], "0");
-    assert.equal(headers["x-vayne"], "0");
-    assert.equal(headers["x-sivir"], undefined);
-    assert.equal(headers["x-session-id"], "synthetic-guest-session");
-    assert.equal(headers["content-length"], undefined);
-    assert.equal(isXiaochanGuest(headers), true);
-  }
-  for (const input of [
-    '{"x-teemo":"0"}',
-    '{"x-vayne":"0"}',
-    '{"x-teemo":"-1","x-vayne":"0"}',
-    '{"x-teemo":"0","x-vayne":"1"}',
-    '{"x-teemo":"1","x-vayne":"0"}',
-    '{"x-teemo":0,"x-vayne":0}',
-  ]) assert.throws(() => parseXiaochanSession(input));
-  assert.equal(isXiaochanGuest(parseXiaochanSession('{"x-teemo":"1","x-vayne":"2"}')), false);
-  assert.equal(isXiaochanGuest(parseXiaochanSession('{"x-teemo":"00","x-vayne":"000"}')), true);
-});
 test("Xiaochan adapter excludes Eleme and affiliate commission to avoid false stacking", () => {
   const row = {
     source: 1,
@@ -591,73 +539,6 @@ test("Xiaochan adapter excludes Eleme and affiliate commission to avoid false st
   assert.equal(result[0]?.meituanPoiId, undefined);
   assert.equal(result[0]?.rule.kind, "fixed");
   assert.throws(() => normalizeXiaochan({ new_schema: [] }));
-});
-test("Xiaochan session accepts captured HTTP/2 headers and Markdown escapes", () => {
-  const lines = [
-    ":method: POST",
-    ":authority: gw.xiaocantech.com",
-    ":path: /rpc",
-    ":scheme: https",
-    "content-length: 125",
-    "xweb_xhr: 1",
-    "x-teemo: 123456",
-    "X-Vayne: 6789",
-    "x-sivir: private-test-session",
-    "x-city: 450103",
-    "servername: SilkwormFusion",
-    "referer: https://servicewechat.com/example/page-frame.html",
-  ];
-  for (const input of [
-    lines.join("\r\n"),
-    lines
-      .map(
-        (line) => line.replaceAll(".", "\\.").replaceAll("://", "\\://") + "\\",
-      )
-      .join("\n"),
-  ]) {
-    const headers = parseXiaochanSession(input);
-    assert.equal(headers["x-teemo"], "123456");
-    assert.equal(headers["x-vayne"], "6789");
-    assert.equal(headers["x-sivir"], "private-test-session");
-    assert.equal(headers.xweb_xhr, "1");
-    assert.equal(
-      headers.referer,
-      "https://servicewechat.com/example/page-frame.html",
-    );
-    assert.equal(headers[":authority"], undefined);
-    assert.equal(headers["content-length"], undefined);
-    assert.equal(headers.servername, undefined);
-  }
-});
-test("Xiaochan rejects URL-only, malformed headers and other endpoints", () => {
-  for (const input of [
-    undefined,
-    {},
-    "",
-    "x".repeat(64_001),
-    "https://gw.xiaocantech.com/rpc",
-    '{"headers":[]}',
-    "x-teemo: 1\nx-vayne: 2\nmalformed",
-    "x-teemo: 1\nX-Teemo: 2\nx-vayne: 3",
-    ...[":authority: evil.example", ":path: /other", ":scheme: http"].map(
-      (line) => `${line}\nx-teemo: 1\nx-vayne: 2`,
-    ),
-  ])
-    assert.throws(() => parseXiaochanSession(input));
-  assert.equal(
-    parseXiaochanSession('{"headers":{"X-Teemo":"1","X-Vayne":"2"}}')[
-      "x-vayne"
-    ],
-    "2",
-  );
-});
-test("Xiaochan preserves the captured WeChat request header across import formats", () => {
-  for (const input of [
-    "x-teemo: 123456789\nx-vayne: 6789\nxweb_xhr: 1",
-    '{"headers":{"X-Teemo":"123456789","X-Vayne":"6789","XWEB_XHR":"1"}}',
-    "curl 'https://gw.xiaocantech.com/rpc' -H 'X-Teemo: 123456789' -H 'X-Vayne: 6789' -H 'xweb_xhr: 1'",
-  ]) assert.equal(parseXiaochanSession(input).xweb_xhr, "1");
-  assert.throws(() => parseXiaochanSession('{"x-teemo":"123456789","x-vayne":"6789","xweb_xhr":"1\\r\\nInjected: true"}'));
 });
 const capturedXiaochanRow = {
   source: 1,
@@ -779,7 +660,7 @@ test("Xiaochan radius sync ignores unusable prices outside the requested area wh
         ? [{ ...capturedXiaochanRow, promotion_id: "near", distance: 7000 }]
         : [] });
   });
-  const offers = await fetchXiaochan({ "x-teemo": "0", "x-vayne": "0" }, {
+  const offers = await fetchXiaochan(testXiaochanAccount(), {
     label: "测试地址", cityCode: 310000, latitude: 31.23, longitude: 121.47,
   }, { radiusMeters: 7000 });
   assert.deepEqual(offsets, [0, 20, 40]);
@@ -835,22 +716,11 @@ test("Xiaochan generates request parameters from the saved location without capt
     });
   });
   const result = await fetchXiaochan(
-    parseXiaochanSession("x-teemo: 123456\nx-vayne: 6789\ncontent-length: 125"),
+    testXiaochanAccount({ silkId: "123456" }),
     location,
   );
   assert.equal(result[0]?.source, "live");
   assert.equal(result[0]?.startTime, "08:00");
-});
-test("Xiaochan sends an explicitly captured xweb_xhr value without mutating the session", async (t) => {
-  let sent: string | null = null;
-  t.mock.method(globalThis, "fetch", async (_url: string, init: RequestInit) => {
-    sent = new Headers(init.headers).get("xweb_xhr");
-    return Response.json({ status: { code: 0 }, feed_items: [] });
-  });
-  const session = parseXiaochanSession("x-teemo: 123456789\nx-vayne: 6789\nxweb_xhr: 0");
-  await fetchXiaochan(session, { label: "南宁", cityCode: 450103, latitude: 22.82, longitude: 108.36 });
-  assert.equal(sent, "0");
-  assert.equal(session.xweb_xhr, "0");
 });
 test("Xiaochan feed body matches the captured mini-program schema and numeric types", async (t) => {
   let sent: RequestInit | undefined;
@@ -858,9 +728,7 @@ test("Xiaochan feed body matches the captured mini-program schema and numeric ty
     sent = init;
     return Response.json({ status: { code: 0 }, feed_items: [] });
   });
-  const session = parseXiaochanSession(
-    "x-teemo: 123456789\nx-vayne: 6789\ncontent-length: 125",
-  );
+  const session = testXiaochanAccount();
   const location = {
     label: "测试地址",
     cityCode: 450103,
@@ -884,40 +752,6 @@ test("Xiaochan feed body matches the captured mini-program schema and numeric ty
   );
   assert.equal(Buffer.byteLength(String(sent?.body)), 125);
   assert.equal(new Headers(sent?.headers).get("content-length"), null);
-});
-test("Xiaochan guest radius sync uses zero identities, fresh signatures and no account credentials", async (t) => {
-  const requests: RequestInit[] = [];
-  t.mock.method(globalThis, "fetch", async (_url: string, init: RequestInit) => {
-    requests.push(init);
-    return Response.json(requests.length === 1
-      ? { status: { code: 0 }, feed_items: [{ ...capturedXiaochanRow, distance: 1200 }] }
-      : { status: { code: 0 } });
-  });
-  const session = parseXiaochanSession(JSON.stringify({
-    "x-teemo": "0", "x-vayne": "0", "x-session-id": "synthetic-guest-session",
-    "x-nami": "captured-guest-nonce", "x-ashe": "captured-guest-signature", "x-garen": "1",
-  }));
-  const offers = await fetchXiaochan(session,
-    { label: "测试地址", cityCode: 450103, latitude: 22.82, longitude: 108.36 }, { radiusMeters: 7000 });
-  assert.equal(offers.length, 1);
-  assert.equal(offers[0]?.source, "live");
-  assert.deepEqual(requests.map(request => JSON.parse(String(request.body)).offset), [0, 20]);
-  const md5 = (text: string) => createHash("md5").update(text).digest("hex");
-  for (const request of requests) {
-    const headers = new Headers(request.headers);
-    assert.equal(headers.get("x-teemo"), "0");
-    assert.equal(headers.get("x-vayne"), "0");
-    assert.equal(headers.get("x-sivir"), null);
-    assert.equal(headers.get("authorization"), null);
-    assert.equal(headers.get("cookie"), null);
-    assert.equal(headers.get("x-session-id"), "synthetic-guest-session");
-    assert.equal(JSON.parse(String(request.body)).silk_id, 0);
-    const nonce = headers.get("x-nami")!;
-    assert.match(nonce, /^[a-f0-9]{4}0[a-f0-9]{11}$/);
-    const method = `${headers.get("servername")}.${headers.get("methodname")}`.toLowerCase();
-    assert.equal(headers.get("x-ashe"), md5(md5(method) + headers.get("x-garen") + nonce));
-  }
-  assert.equal(session["x-nami"], "captured-guest-nonce");
 });
 test("Xiaochan radius sync continues past mixed pages with no eligible offers", async (t) => {
   const offsets: number[] = [];
@@ -944,7 +778,7 @@ test("Xiaochan radius sync continues past mixed pages with no eligible offers", 
     },
   );
   const offers = await fetchXiaochan(
-    parseXiaochanSession("x-teemo: 123456789\nx-vayne: 6789"),
+    testXiaochanAccount(),
     { label: "测试地址", cityCode: 450103, latitude: 22.82, longitude: 108.36 },
     { radiusMeters: 7000 },
   );
@@ -964,19 +798,8 @@ test("Xiaochan refreshes a 16-character nonce and signs the same values sent ups
     latitude: 22.82,
     longitude: 108.36,
   };
-  const session = parseXiaochanSession(
-    [
-      "x-teemo: 123456789",
-      "x-vayne: 6789",
-      "x-nami: captured-old-nonce",
-      "x-garen: 1",
-      "x-ashe: captured-old-signature",
-      "x-sivir: private-test-token",
-      "x-version: 3.22.2.83",
-      "x-annie: XC",
-      "x-session-id: private-test-session",
-    ].join("\n"),
-  );
+  const session = testXiaochanAccount();
+  const original = { ...session };
   const nonces = new Set<string>();
   const requests: RequestInit[] = [];
   t.mock.method(
@@ -1006,7 +829,7 @@ test("Xiaochan refreshes a 16-character nonce and signs the same values sent ups
     assert.equal(headers.get("x-version"), "3.22.2.83");
     assert.equal(JSON.parse(String(init.body)).silk_id, 123456789);
   }
-  assert.equal(session["x-nami"], "captured-old-nonce");
+  assert.deepEqual(session, original);
 });
 test("Xiaochan nonce remains 16 characters for supported device ID lengths", async (t) => {
   const nonces: string[] = [];
@@ -1020,7 +843,7 @@ test("Xiaochan nonce remains 16 characters for supported device ID lengths", asy
   );
   for (const identity of ["1", "123456", "123456789", "123456789012"])
     await fetchXiaochan(
-      parseXiaochanSession(`x-teemo: ${identity}\nx-vayne: 6789`),
+      testXiaochanAccount({ silkId: identity }),
       {
         label: "南宁",
         cityCode: 450103,
@@ -1029,9 +852,22 @@ test("Xiaochan nonce remains 16 characters for supported device ID lengths", asy
       },
     );
   assert.ok(nonces.every((nonce) => nonce.length === 16));
-  assert.throws(() =>
-    parseXiaochanSession("x-teemo: 1234567890123\nx-vayne: 6789"),
-  );
+  await assert.rejects(fetchXiaochan(testXiaochanAccount({ silkId: "1234567890123" }), {
+    label: "南宁", cityCode: 450103, latitude: 22.82, longitude: 108.36,
+  }), { statusCode: 401 });
+});
+test("Xiaochan synchronization requires valid account credentials before querying upstream", async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    calls++;
+    return Response.json({ status: { code: 0 }, feed_items: [] });
+  });
+  const location = { label: "南宁", cityCode: 450103, latitude: 22.82, longitude: 108.36 };
+  for (const account of [
+    undefined, testXiaochanAccount({ silkId: "0", userId: "0" }),
+    testXiaochanAccount({ accessToken: "" }), testXiaochanAccount({ expiresAt: Date.now() - 1 }),
+  ]) await assert.rejects(fetchXiaochan(account as XiaochanAccount, location), { statusCode: 401 });
+  assert.equal(calls, 0);
 });
 test("Xiaochan HTTP rejection is not mislabeled as proven risk control and never retried", async (t) => {
   let calls = 0;
@@ -1041,7 +877,7 @@ test("Xiaochan HTTP rejection is not mislabeled as proven risk control and never
     calls++;
     return response();
   });
-  const headers = parseXiaochanSession("x-teemo: 123456789\nx-vayne: 6789");
+  const headers = testXiaochanAccount();
   const location = {
     label: "南宁",
     cityCode: 450103,
@@ -1050,7 +886,7 @@ test("Xiaochan HTTP rejection is not mislabeled as proven risk control and never
   };
   for (const [code, expectedStatus, message] of [
     [403, 502, "小蚕拒绝同步请求"],
-    [401, 401, "小蚕会话无效，请重新导入"],
+    [401, 401, "小蚕登录已失效，请重新登录"],
     [429, 502, "小蚕请求频繁，请稍后重试"],
     [503, 502, "小蚕返回 HTTP 503"],
   ] as const) {
@@ -1071,7 +907,7 @@ test("Xiaochan identifies only explicit WAF pages without retrying or exposing t
     calls++;
     return response;
   });
-  const headers = parseXiaochanSession("x-teemo: 123456789\nx-vayne: 6789");
+  const headers = testXiaochanAccount();
   const location = {
     label: "南宁",
     cityCode: 450103,
@@ -1130,7 +966,7 @@ test("Xiaochan bounds WAF response inspection and cancels oversized streams", as
   );
   t.mock.method(globalThis, "fetch", async () => response);
   await assert.rejects(
-    fetchXiaochan(parseXiaochanSession("x-teemo: 123456789\nx-vayne: 6789"), {
+    fetchXiaochan(testXiaochanAccount(), {
       label: "南宁",
       cityCode: 450103,
       latitude: 22.82,
@@ -1149,7 +985,7 @@ test("Xiaochan bounds WAF response inspection and cancels oversized streams", as
 test("Xiaochan distinguishes expired sessions from RPC failures without exposing upstream fields", async (t) => {
   let payload: unknown;
   t.mock.method(globalThis, "fetch", async () => Response.json(payload));
-  const headers = parseXiaochanSession("x-teemo: 123456789\nx-vayne: 6789");
+  const headers = testXiaochanAccount();
   const location = {
     label: "南宁",
     cityCode: 450103,
@@ -1159,16 +995,16 @@ test("Xiaochan distinguishes expired sessions from RPC failures without exposing
   for (const [status, expectedStatus, message] of [
     [null, 502, "小蚕返回内容异常，请稍后重试"],
     [{ code: null }, 502, "小蚕返回内容异常，请稍后重试"],
-    [{ code: 401, msg: "private-token" }, 401, "小蚕会话无效，请重新导入"],
+    [{ code: 401, msg: "private-token" }, 401, "小蚕登录已失效，请重新登录"],
     [
       { code: 1001, msg: "登录已失效 private-token" },
       401,
-      "小蚕会话无效，请重新导入",
+      "小蚕登录已失效，请重新登录",
     ],
     [
       { code: 1002, msg: "invalid X-Nami private-token" },
       502,
-      "小蚕请求校验失败，请重新导入会话",
+      "小蚕请求校验失败，请重新登录",
     ],
     [
       { code: 1003, msg: "upstream unavailable private-token" },

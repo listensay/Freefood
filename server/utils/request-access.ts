@@ -6,7 +6,11 @@ export function assertRequestAccess(event: H3Event, allowDevProxy = false) {
     xForwardedHost: false,
     xForwardedProto: false,
   });
-  const allowLan = process.env.FOOD_ALLOW_LAN === "1";
+  let pathname = url.pathname;
+  try { pathname = decodeURIComponent(pathname); } catch {}
+  const computerWeChat = /^\/api\/connections\/(xiaochan|waimai)\/wechat\/?$/.test(pathname);
+  const computerChrome = /^\/api\/connections\/meituan\/browser\/?$/.test(pathname);
+  const allowLan = !computerWeChat && !computerChrome && process.env.FOOD_ALLOW_LAN === "1";
   const socket = event.node.req.socket;
   // The dev entry checks the TCP peer before Nitro forwards to its private Unix socket.
   const devProxy =
@@ -24,7 +28,8 @@ export function assertRequestAccess(event: H3Event, allowDevProxy = false) {
   )
     throw createError({
       statusCode: 403,
-      statusMessage: allowLan
+      statusMessage: computerWeChat ? "请在运行服务的电脑连接微信" : computerChrome
+        ? "请在运行服务的电脑连接 Chrome" : allowLan
         ? "仅允许本机或局域网访问"
         : "此工具仅允许本机使用，请通过 localhost 访问",
     });

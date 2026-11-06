@@ -42,6 +42,7 @@ export default defineEventHandler(async (event) => {
       cityName: body.cityName?.trim() || undefined,
     };
     if (!firstAutomaticLocation) {
+      delete session.xiaochanSchedules;
       session.offers = { xiaochan: [], waimai: [], meituan: [] };
       session.updatedAt = {};
     }

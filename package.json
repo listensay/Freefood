@@ -9,7 +9,7 @@
     "generate": "nuxt generate",
     "preview": "nuxt preview",
     "postinstall": "nuxt prepare",
-    "test": "tsx --test tests/core.test.ts tests/waimai.test.ts tests/network.test.ts tests/remote-input.test.ts tests/meituan-session.test.ts",
+    "test": "tsx --test tests/core.test.ts tests/waimai.test.ts tests/network.test.ts tests/remote-input.test.ts tests/chrome-meituan.test.ts tests/xiaochan-rpc.test.ts tests/xiaochan-enrollment.test.ts tests/wechat-xiaochan.test.ts tests/wechat-waimai.test.ts",
     "typecheck": "nuxt typecheck",
     "test:integration": "npm run build && tsx --test tests/api.test.ts tests/lan.test.ts tests/remote.test.ts && tsx --test tests/dev-lan.test.ts",
     "start": "HOST=127.0.0.1 node .output/server/index.mjs",

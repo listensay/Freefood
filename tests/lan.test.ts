@@ -57,6 +57,8 @@ try {
     const data = await init.json();
     assert.equal(data.xiaochanHeaders, undefined);
     assert.equal(data.waimaiToken, undefined);
+    assert.equal(data.xiaochanAccount, undefined);
+    assert.equal(data.waimaiAccount, undefined);
   });
 
   await test("LAN same-origin mutations work and do not authenticate imported offers", async () => {

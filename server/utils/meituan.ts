@@ -1,5 +1,5 @@
 import { chromium } from "playwright-core";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type {
   Browser,
   BrowserContext,
@@ -27,6 +27,7 @@ import {
 } from "./meituan-login";
 import { MEITUAN_ACTIVITY_URL } from "../../shared/meituan";
 import { collectActivityPages, type ActivityPage } from "./activity-pages";
+import type { MeituanBrowserStorage } from "./chrome-meituan";
 
 export const MEITUAN_URL = MEITUAN_ACTIVITY_URL;
 
@@ -297,6 +298,7 @@ async function openBrowser(
   id: string,
   headed: boolean,
   initialUrl = MEITUAN_URL,
+  initialSession?: { meituanStorage: MeituanBrowserStorage; location?: LocationSettings | null },
 ): Promise<BrowserSession> {
   const existing = browsers.get(id);
   if (existing?.browser.isConnected() && existing.headed === headed) {
@@ -319,7 +321,7 @@ async function openBrowser(
         statusCode: 429,
         statusMessage: "登录窗口过多，请关闭不用的会话",
       });
-    const local = await loadSession(id);
+    const local = initialSession || await loadSession(id);
     let browser: Browser;
     try {
       browser = await chromium.launch({
@@ -475,7 +477,7 @@ async function openBrowser(
               state.pageError = "美团活动页面加载失败，请稍后重试";
             else
               state.error =
-                "美团活动接口拒绝访问，请在登录页面完成验证后再刷新";
+                "美团活动接口拒绝访问，请在试吃官页面完成验证后重试";
             return;
           }
           if (url.pathname === "/act/ge/getPageModuleInfo") {
@@ -509,7 +511,7 @@ async function openBrowser(
         })().catch((error: any) => {
           if (generation !== state.captureAfter) return;
           if (url.pathname === "/act/ge/getUserInfo")
-            state.userError = "无法解析美团身份响应，请重新打开登录页面";
+            state.userError = "无法解析美团身份响应，请重新打开试吃官页面";
           else
             state.error = error.message?.startsWith("美团")
               ? error.message
@@ -668,7 +670,7 @@ async function waitForOfficialData(
   }
   throw createError({
     statusCode: 504,
-    statusMessage: "美团活动加载失败，请检查登录页面后重试",
+    statusMessage: "美团活动加载失败，请检查试吃官页面后重试",
   });
 }
 
@@ -752,6 +754,27 @@ export async function verifyMeituanLogin(id: string, token?: string) {
   });
   if (token && state.remote?.token === token && browsers.get(id) === state)
     await closeMeituan(id);
+}
+
+export async function verifyMeituanBrowserStorage(
+  storage: MeituanBrowserStorage,
+  location?: LocationSettings | null,
+): Promise<{ storage: MeituanBrowserStorage; label: string; accountId: string }> {
+  const id = randomBytes(32).toString("hex");
+  try {
+    const state = await openBrowser(id, false, MEITUAN_URL, { meituanStorage: storage, location });
+    await waitForOfficialData(state, 30_000, false);
+    if (!state.phone) throw createError({ statusCode: 401, statusMessage: "请先在 Chrome 的试吃官页面中登录" });
+    const verifiedStorage = await state.context.storageState();
+    return {
+      storage: { cookies: verifiedStorage.cookies.filter(cookie =>
+        [".meituan.com", "meituan.com", "offsiteact.meituan.com", ".offsiteact.meituan.com"].includes(cookie.domain)), origins: [] },
+      label: maskPhone(state.phone),
+      accountId: createHash("sha256").update(state.phone).digest("hex"),
+    };
+  } finally {
+    await closeMeituan(id);
+  }
 }
 
 export async function fetchMeituan(

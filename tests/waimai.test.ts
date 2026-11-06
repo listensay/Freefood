@@ -11,7 +11,7 @@ import {
 import {
   fetchWaimai,
   normalizeWaimai,
-  parseWaimaiToken,
+  verifyWaimaiAccount,
 } from "../server/utils/waimai";
 import { calculatePrice, estimatePrice, activeAt } from "../shared/utils/pricing";
 import { matchStores } from "../shared/utils/matching";
@@ -39,6 +39,7 @@ const payload = (rows = [store]) => ({
   code: 200,
   data: { data: rows, scrollPageData: { page: 2 } },
 });
+const account = { userId: "20261001120000-123456abcd_user", uid: "123456789012345678", token: "private-token" };
 const location = {
   label: "科技园",
   cityCode: 440300,
@@ -46,28 +47,6 @@ const location = {
   latitude: 22.54,
   longitude: 113.95,
 };
-
-test("Waimai token import accepts a token, case-insensitive JSON headers and explicit guest access", () => {
-  assert.equal(parseWaimaiToken(" token-123.abc "), "token-123.abc");
-  assert.equal(
-    parseWaimaiToken(
-      '{"headers":{"Token":"private-token","Host":"evil.example"}}',
-    ),
-    "private-token",
-  );
-  assert.equal(parseWaimaiToken(""), "");
-  assert.throws(() => parseWaimaiToken('{"authorization":"fake"}'));
-  assert.throws(() => parseWaimaiToken('{"token":123}'));
-  assert.throws(() => parseWaimaiToken("{bad}"), /请求头 JSON 格式错误/);
-  assert.throws(
-    () => parseWaimaiToken('{"headers":[]}'),
-    /请求头 JSON 格式错误/,
-  );
-  assert.throws(() => parseWaimaiToken('{"token":""}'));
-  assert.throws(() => parseWaimaiToken("a\r\nInjected: 1"));
-  assert.throws(() => parseWaimaiToken("$(touch /tmp/should-not-exist)"));
-  assert.throws(() => parseWaimaiToken("x".repeat(16_001)));
-});
 
 test("Waimai adapter uses yuan accurately and excludes VIP compensation from ordinary cashback", () => {
   const offer = normalizeWaimai(payload())[0]!;
@@ -193,6 +172,58 @@ const unaes = (text: string, key: string) => {
     decipher.final(),
   ]).toString();
 };
+const userInfo = {
+  uid: account.uid, nickName: "测试用户",
+  avatarUrl: "https://example.com/avatar.png", phoneNumber: "13800000000",
+  userToken: "private-upstream-token", status: false,
+};
+
+test("Waimai identity verification uses the mini-program gateway and returns only basic profile fields", async () => {
+  const profile = await verifyWaimaiAccount(account, async (url, init) => {
+    assert.equal(String(url), "https://fz-gateway.waimaimingtang.com/api/api/v2/user/api_user_info_one");
+    assert.equal(init?.method, "POST");
+    assert.equal(init?.redirect, "error");
+    const headers = new Headers(init?.headers);
+    assert.equal(headers.get("token"), account.token);
+    assert.equal(headers.get("application"), "overbear_one");
+    assert.equal(headers.get("city"), "");
+    assert.match(headers.get("nonce")!, /^[0-8]{16}$/);
+    assert.equal(unaes(headers.get("sign")!, "asdf545asdf4545d"), headers.get("timestamp")! + headers.get("nonce")!);
+    assert.deepEqual(JSON.parse(unaes(JSON.parse(String(init?.body)).json, "jnd674751fh6fkgu")), {
+      serviceNoStr: "api_user_info_one", city: "", userId: account.userId,
+    });
+    return Response.json({ code: 1, data: aes(JSON.stringify(userInfo), "jnd674751fh6fkgu") });
+  });
+  assert.deepEqual(profile, { userId: account.uid, nickname: "测试用户",
+    avatar: userInfo.avatarUrl, phone: "138****0000" });
+});
+
+test("Waimai identity verification accepts decoded responses and filters invalid optional fields", async () => {
+  const profile = await verifyWaimaiAccount(account, async () => Response.json({ code: 200,
+    data: { ...userInfo, nickName: "\ninvalid", avatarUrl: "javascript:alert(1)", phoneNumber: "invalid" },
+  }));
+  assert.deepEqual(profile, { userId: account.uid });
+});
+
+test("Waimai identity verification rejects expired, mismatched and malformed responses", async () => {
+  for (const data of [
+    { code: -3 }, { code: 401 }, { code: 403 },
+    { code: 1, data: { ...userInfo, uid: "another-user" } },
+    { code: 1, data: { ...userInfo, application: "other_app" } },
+  ]) await assert.rejects(verifyWaimaiAccount(account, async () => Response.json(data)), { statusCode: 401 });
+  for (const data of [{ code: 500 }, { code: 1, data: "invalid" }])
+    await assert.rejects(verifyWaimaiAccount(account, async () => Response.json(data)), { statusCode: 502 });
+});
+
+test("Waimai requires an account before any identity or activity request", async () => {
+  const forbiddenFetch: typeof fetch = async () => { assert.fail("Unauthenticated requests must not reach upstream"); };
+  for (const invalid of [undefined, { ...account, token: "" }, { ...account, token: "injected\r\nheader" },
+    { ...account, userId: "" }, { ...account, uid: "" }, { ...account, token: "x".repeat(16_001) }]) {
+    await assert.rejects(verifyWaimaiAccount(invalid as typeof account, forbiddenFetch), { statusCode: 401 });
+    await assert.rejects(fetchWaimai(invalid as typeof account, location, forbiddenFetch), { statusCode: 401 });
+  }
+});
+
 function mockTransport(
   token: string,
   encrypted: boolean,
@@ -274,22 +305,22 @@ function mockTransport(
 
 test("Waimai transport refreshes dynamic keys and handles encrypted authenticated responses", async () => {
   const result = await fetchWaimai(
-    "private-token",
+    account,
     location,
     mockTransport("private-token", true),
   );
   assert.equal(result.length, 1);
   assert.equal(result[0]?.rule.kind, "fixed");
 });
-test("Waimai transport accepts unencrypted guest responses without assuming login", async () => {
+test("Waimai transport accepts unencrypted authenticated responses", async () => {
   assert.equal(
-    (await fetchWaimai("", location, mockTransport("", false))).length,
+    (await fetchWaimai(account, location, mockTransport("private-token", false))).length,
     1,
   );
 });
 test("Waimai transport supports bare base64 DER keys returned by the live service", async () => {
   assert.equal(
-    (await fetchWaimai("", location, mockTransport("", true, payload(), true)))
+    (await fetchWaimai(account, location, mockTransport("private-token", true, payload(), true)))
       .length,
     1,
   );
@@ -321,7 +352,7 @@ test("Waimai radius sync follows encrypted cursors and keeps distinct activity S
     { code: 200, data: { data: [], scrollPageData: null } },
   ];
   const offers = await fetchWaimai(
-    "private-token",
+    account,
     location,
     mockTransport("private-token", true, payload(), false, pages),
     { radiusMeters: 7000 },
@@ -334,36 +365,36 @@ test("Waimai radius sync follows encrypted cursors and keeps distinct activity S
 });
 test("Waimai transport rejects missing city, expired login, invalid configuration and network errors", async () => {
   await assert.rejects(
-    fetchWaimai("", { ...location, cityName: undefined }, async () => {
+    fetchWaimai(account, { ...location, cityName: undefined }, async () => {
       throw new Error("must not fetch");
     }),
     { statusCode: 400 },
   );
   await assert.rejects(
-    fetchWaimai("", location, async () => new Response("", { status: 401 })),
+    fetchWaimai(account, location, async () => new Response("", { status: 401 })),
     { statusCode: 401 },
   );
   await assert.rejects(
-    fetchWaimai("", location, async () => new Response("", { status: 403 })),
+    fetchWaimai(account, location, async () => new Response("", { status: 403 })),
     { statusCode: 502 },
   );
   await assert.rejects(
-    fetchWaimai("", location, async () =>
+    fetchWaimai(account, location, async () =>
       Response.json({ code: 1, data: "bad" }),
     ),
     { statusCode: 502 },
   );
   await assert.rejects(
-    fetchWaimai("", location, async () => {
+    fetchWaimai(account, location, async () => {
       throw new Error("private upstream message");
     }),
     { statusCode: 502 },
   );
   await assert.rejects(
     fetchWaimai(
-      "",
+      account,
       location,
-      mockTransport("", true, { code: 401 } as ReturnType<typeof payload>),
+      mockTransport("private-token", true, { code: 401 } as ReturnType<typeof payload>),
     ),
     { statusCode: 401 },
   );

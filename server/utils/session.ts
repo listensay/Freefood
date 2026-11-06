@@ -1,5 +1,5 @@
 import { randomBytes, createCipheriv, createDecipheriv } from "node:crypto";
-import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
+import { mkdir, readFile, writeFile, rename, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { H3Event } from "h3";
 import {
@@ -8,14 +8,27 @@ import {
   setCookie,
   getRequestURL,
 } from "h3";
-import type { DashboardData } from "../../shared/types";
+import type { DashboardData, Provider, EnrollmentSchedule, Offer, LocationSettings } from "../../shared/types";
 import { providers } from "../../shared/types";
 import { assertRequestAccess } from "./request-access";
+import type { XiaochanAccount } from "./xiaochan-rpc";
+import type { WaimaiAccount } from "./waimai";
 
 export interface LocalSession extends DashboardData {
-  xiaochanHeaders?: Record<string, string>;
-  waimaiToken?: string;
+  xiaochanAccount?: XiaochanAccount;
+  xiaochanEnrollments?: Record<string, {
+    state: "enrolled" | "unknown" | "cancel-unknown";
+    orderId?: string;
+    updatedAt: string;
+  }>;
+  xiaochanSchedules?: Record<string, EnrollmentSchedule & {
+    offer: Offer;
+    location: LocationSettings;
+    accountId: string;
+  }>;
+  waimaiAccount?: WaimaiAccount;
   meituanStorage?: unknown;
+  meituanAccountId?: string;
   lastSync?: number;
 }
 
@@ -23,6 +36,15 @@ const directory = resolve(process.env.FOOD_DATA_DIR || ".data/food");
 let keyPromise: Promise<Buffer> | undefined;
 const sessions = new Map<string, LocalSession>();
 const locks = new Map<string, Promise<unknown>>();
+
+export async function storedSessionIds(): Promise<string[]> {
+  try {
+    return (await readdir(directory)).filter(name => /^[a-f0-9]{64}\.enc$/.test(name)).map(name => name.slice(0, -4));
+  } catch (error: any) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
+}
 
 async function encryptionKey(): Promise<Buffer> {
   return (keyPromise ??= (async () => {
@@ -119,6 +141,20 @@ export async function loadSession(id: string): Promise<LocalSession> {
       changed = true;
     }
   }
+  const legacy = session as LocalSession & { xiaochanHeaders?: unknown; waimaiToken?: unknown };
+  for (const field of ["xiaochanHeaders", "waimaiToken"] as const) {
+    if (Object.hasOwn(legacy, field)) {
+      delete legacy[field];
+      changed = true;
+    }
+  }
+  for (const provider of ["xiaochan", "waimai"] as const) {
+    const account = provider === "xiaochan" ? session.xiaochanAccount : session.waimaiAccount;
+    if (!account && session.connections[provider].state !== "disconnected") {
+      session.connections[provider] = { state: "disconnected", label: "未连接" };
+      changed = true;
+    }
+  }
   if (changed) await saveSession(id, session);
   sessions.set(id, session);
   return session;
@@ -156,11 +192,31 @@ export function withSessionLock<T>(
   return current;
 }
 
+export function samePlatformAccount(a: LocalSession, b: LocalSession, provider: Provider): boolean {
+  const account = (session: LocalSession) => provider === "xiaochan" ? session.xiaochanAccount
+    : provider === "waimai" ? session.waimaiAccount : session.meituanStorage;
+  return JSON.stringify(account(a) ?? null) === JSON.stringify(account(b) ?? null);
+}
+
 export function publicSession(session: LocalSession): DashboardData {
+  const enrollmentSchedules = Object.values(session.xiaochanSchedules || {}).map(({ offerId, name, runAt, state, message }) =>
+    ({ offerId, name, runAt, state, ...(message ? { message } : {}) }),
+  );
   return {
     location: session.location,
     connections: session.connections,
-    offers: session.offers,
+    offers: {
+      ...session.offers,
+      xiaochan: session.offers.xiaochan.map(offer => {
+        const { enrollment: _storedEnrollment, enrollmentSchedule: _storedSchedule, ...activity } = offer;
+        const enrollment = session.xiaochanEnrollments?.[offer.id];
+        const enrollmentSchedule = enrollmentSchedules.find(schedule => schedule.offerId === offer.id);
+        return { ...activity, ...(enrollmentSchedule ? { enrollmentSchedule } : {}), ...(enrollment ? { enrollment: {
+          state: enrollment.state, orderId: enrollment.orderId,
+        } } : {}) };
+      }),
+    },
     updatedAt: session.updatedAt,
+    enrollmentSchedules,
   };
 }

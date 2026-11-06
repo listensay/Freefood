@@ -11,7 +11,7 @@ import {
   type KeyObject,
 } from "node:crypto";
 import { createError } from "h3";
-import type { LocationSettings, Offer, SyncScope } from "../../shared/types";
+import type { AccountProfile, LocationSettings, Offer, SyncScope } from "../../shared/types";
 import { safeUrl } from "../../shared/utils/import";
 import { toCents } from "../../shared/utils/pricing";
 import { collectActivityPages, type ActivityPage } from "./activity-pages";
@@ -20,34 +20,24 @@ const CONFIG_URL =
   "https://fz-gateway.waimaimingtang.com/api/api/v2/index/newServiceConfig";
 const SHOP_URL =
   "https://wmapp-api-v2.waimaimingtang.com/api/bwc/waimaimt-web-bwc/shopIndex/getShopList";
+const USER_URL =
+  "https://fz-gateway.waimaimingtang.com/api/api/v2/user/api_user_info_one";
 const LEGACY_KEY = "jnd674751fh6fkgu";
 const SIGN_KEY = "asdf545asdf4545d";
 
-export function parseWaimaiToken(text: unknown): string {
-  if (typeof text !== "string" || text.length > 16_000)
-    throw new Error("请提供有效的歪麦登录 token");
-  let token = text.trim();
-  if (token.startsWith("{")) {
-    let data;
-    try {
-      data = JSON.parse(token);
-    } catch {
-      throw new Error("请求头 JSON 格式错误");
-    }
-    const headers = data.headers || data;
-    if (!headers || typeof headers !== "object" || Array.isArray(headers))
-      throw new Error("请求头 JSON 格式错误");
-    const entry = Object.entries(headers).find(
-      ([key]) => key.toLowerCase() === "token",
-    );
-    if (!entry || typeof entry[1] !== "string")
-      throw new Error("请求头缺少歪麦登录 token");
-    token = entry[1].trim();
-    if (!token) throw new Error("请求头缺少歪麦登录 token");
-  }
-  if (token && !/^[A-Za-z0-9._~+/=-]+$/.test(token))
-    throw new Error("歪麦登录 token 格式错误");
-  return token;
+export interface WaimaiAccount {
+  userId: string;
+  uid: string;
+  token: string;
+}
+
+function assertAccount(account: WaimaiAccount) {
+  if (!account || typeof account.userId !== "string" ||
+    !/^[A-Za-z0-9_-]{1,128}$/.test(account.userId) ||
+    typeof account.uid !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(account.uid) ||
+    typeof account.token !== "string" || account.token.length > 16_000 ||
+    !/^[A-Za-z0-9._~+/=-]+$/.test(account.token))
+    throw createError({ statusCode: 401, statusMessage: "请先登录歪麦" });
 }
 
 function encrypt(text: string, key: string): string {
@@ -74,17 +64,17 @@ function decrypt(text: string, key: string): string {
 }
 
 function commonHeaders(token: string, city: string): Record<string, string> {
-  const nonce = Array.from({ length: 16 }, () => randomInt(10)).join("");
+  const nonce = Array.from({ length: 16 }, () => randomInt(9)).join("");
   const timestamp = String(Date.now());
   return {
     application: "overbear_one",
-    ...(token ? { token } : {}),
+    token,
     nonce,
     timestamp,
     sign: encrypt(timestamp + nonce, SIGN_KEY),
     city: encodeURIComponent(city),
     appversion: "1.1.175",
-    referer: "https://servicewechat.com/wx5762f23d920ad9e5/346/page-frame.html",
+    referer: "https://servicewechat.com/wx5762f23d920ad9e5/363/page-frame.html",
     "content-type": "application/json",
   };
 }
@@ -134,7 +124,7 @@ async function request(
       statusCode: response.status === 401 ? 401 : 502,
       statusMessage:
         response.status === 401
-          ? "歪麦登录已失效，请重新导入 token"
+          ? "歪麦登录已失效，请重新连接"
           : response.status === 403
             ? "歪麦请求被拦截，请稍后重试"
             : `歪麦返回 HTTP ${response.status}`,
@@ -144,15 +134,51 @@ async function request(
 
 function checkStatus(data: any, expected: number) {
   if (Number(data?.code) === expected) return;
-  if ([401, 403].includes(Number(data?.code)))
+  if ([-3, 401, 403].includes(Number(data?.code)))
     throw createError({
       statusCode: 401,
-      statusMessage: "歪麦登录已失效，请重新导入 token",
+      statusMessage: "歪麦登录已失效，请重新连接",
     });
   throw createError({
     statusCode: 502,
     statusMessage: "歪麦接口拒绝访问，请稍后重试",
   });
+}
+
+export async function verifyWaimaiAccount(
+  account: WaimaiAccount,
+  transport: typeof fetch = fetch,
+): Promise<AccountProfile> {
+  assertAccount(account);
+  const response = await request(USER_URL, {
+    headers: commonHeaders(account.token, ""),
+    body: JSON.stringify({ json: encrypt(JSON.stringify({
+      serviceNoStr: "api_user_info_one", city: "", userId: account.userId,
+    }), LEGACY_KEY) }),
+  }, transport);
+  try {
+    const outer = await response.json();
+    if (Number(outer?.code) !== 200) checkStatus(outer, 1);
+    const user = typeof outer.data === "string"
+      ? JSON.parse(decrypt(outer.data, LEGACY_KEY)) : outer.data;
+    if (!user || typeof user !== "object" || Array.isArray(user) ||
+      user.uid !== account.uid ||
+      (user.application !== undefined && user.application !== "overbear_one"))
+      throw createError({ statusCode: 401, statusMessage: "歪麦账号验证失败，请重新连接" });
+    const nickname = typeof user.nickName === "string" && user.nickName.trim().length <= 100 &&
+      !/[\u0000-\u001f\u007f]/.test(user.nickName) ? user.nickName.trim() : undefined;
+    const phone = typeof user.phoneNumber === "string" && /^1[3-9]\d{9}$/.test(user.phoneNumber)
+      ? `${user.phoneNumber.slice(0, 3)}****${user.phoneNumber.slice(-4)}`
+      : typeof user.phoneNumber === "string" && /^1[3-9]\d\*{4}\d{4}$/.test(user.phoneNumber)
+        ? user.phoneNumber : undefined;
+    const avatar = safeUrl(user.avatarUrl);
+    return { userId: account.uid,
+      ...(nickname ? { nickname } : {}), ...(avatar ? { avatar } : {}), ...(phone ? { phone } : {}),
+    };
+  } catch (error: any) {
+    if (error.statusCode) throw error;
+    throw createError({ statusCode: 502, statusMessage: "歪麦用户信息无法解析，请稍后重试" });
+  }
 }
 
 const requirements: Record<string, string> = {
@@ -241,11 +267,13 @@ export function normalizeWaimai(response: any): Offer[] {
 }
 
 export async function fetchWaimai(
-  token: string,
+  account: WaimaiAccount,
   location: LocationSettings,
   transport: typeof fetch = fetch,
   scope?: SyncScope,
 ): Promise<Offer[]> {
+  assertAccount(account);
+  const token = account.token;
   const city = location.cityName?.trim();
   if (!city)
     throw createError({
