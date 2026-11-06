@@ -672,7 +672,8 @@ async function waitForOfficialData(
 ) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    if (state.userChecked && (!needsOffers || state.capturedAt)) return;
+    // An expired identity may prevent the official page from requesting offers.
+    if (state.userChecked && (!state.phone || !needsOffers || state.capturedAt)) return;
     if (state.userError || state.pageError || (needsOffers && state.error))
       throw createError({
         statusCode: 502,
@@ -682,7 +683,7 @@ async function waitForOfficialData(
   }
   throw createError({
     statusCode: 504,
-    statusMessage: "美团活动加载失败，请检查试吃官页面后重试",
+    statusMessage: needsOffers ? "美团活动加载超时，请稍后重试" : "美团身份验证超时，请稍后重试",
   });
 }
 
@@ -800,23 +801,31 @@ export async function fetchMeituan(
   return browserTask(state, async () => {
     state.lastUsed = Date.now();
     await applyLocation(state.context, location);
-    state.phone = "";
-    state.userChecked = false;
-    state.capturedAt = undefined;
-    state.offerPages.clear();
-    state.offerRequest = undefined;
-    state.offers = [];
-    state.error = undefined;
-    state.userError = undefined;
-    state.pageError = undefined;
-    state.captureAfter = Date.now();
-    state.captureGeneration++;
-    await currentPage(state).goto(MEITUAN_URL, {
-      // Official responses below determine readiness, not unrelated page assets.
-      waitUntil: "commit",
-      timeout: 30_000,
-    });
-    await waitForOfficialData(state);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      state.phone = "";
+      state.userChecked = false;
+      state.capturedAt = undefined;
+      state.offerPages.clear();
+      state.offerRequest = undefined;
+      state.offers = [];
+      state.error = undefined;
+      state.userError = undefined;
+      state.pageError = undefined;
+      state.captureAfter = Date.now();
+      state.captureGeneration++;
+      await currentPage(state).goto(MEITUAN_URL, {
+        // Official responses below determine readiness, not unrelated page assets.
+        waitUntil: "commit",
+        timeout: 30_000,
+      });
+      try {
+        await waitForOfficialData(state);
+        break;
+      } catch (error: any) {
+        // Reload once when responses are missing, never on an official refusal.
+        if (attempt > 0 || error.statusCode !== 504) throw error;
+      }
+    }
     if (!state.phone)
       throw createError({
         statusCode: 401,

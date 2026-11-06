@@ -50,7 +50,6 @@ function createFoodApp() {
   watch(() => route.path, () => {
     filter.value = "all";
     if (!mounted || !loaded.value) return;
-    if (route.path === "/") void sync(true);
     if (route.path === "/accounts") void refreshProfiles();
   });
   onMounted(async () => {

@@ -580,6 +580,75 @@ try {
       }
     } finally { await browser.close(); }
   });
+  await test("Page navigation and history never start or queue syncs; manual and homepage timed sync remain available", async () => {
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ channel: "chrome", headless: true });
+    try {
+      for (const inFlight of [false, true]) {
+        const context = await browser.newContext();
+        const page = await context.newPage();
+        await page.clock.install();
+        const dashboard = {
+          location: { label: "南宁", cityName: "南宁市", cityCode: 450103, latitude: 22.82, longitude: 108.36 },
+          connections: {
+            xiaochan: { state: "connected", label: "已登录", profile: { userId: "1" } },
+            waimai: { state: "disconnected", label: "未连接" },
+            meituan: { state: "disconnected", label: "未连接" },
+          },
+          offers: { xiaochan: [], waimai: [], meituan: [] }, updatedAt: {}, enrollmentSchedules: [],
+        };
+        let syncs = 0;
+        let completeFirst: (() => Promise<void>) | undefined;
+        await page.route("**/api/**", async route => {
+          if (!route.request().url().endsWith("/api/sync")) return route.fulfill({ json: dashboard });
+          const complete = () => route.fulfill({ json: { data: dashboard, errors: [], message: "同步完成" } });
+          if (++syncs === 1 && inFlight) { completeFirst = complete; return; }
+          await complete();
+        });
+        const firstRequest = page.waitForRequest(request => request.url().endsWith("/api/sync"));
+        await page.goto(base);
+        await firstRequest;
+        if (!inFlight) await page.getByRole("button", { name: "同步活动", exact: true }).waitFor();
+        const navigate = async (name: string, path: string) => {
+          await page.getByRole("link", { name, exact: true }).click();
+          await page.waitForURL(base + path);
+          await page.clock.runFor(100);
+          assert.equal(syncs, 1);
+        };
+        await navigate("账号管理", "/accounts");
+        await navigate("返回首页", "/");
+        await navigate("使用指南", "/guide");
+        await navigate("首页", "/");
+        await page.goBack();
+        await page.waitForURL(base + "/guide");
+        await page.clock.runFor(100);
+        assert.equal(syncs, 1);
+        await page.goForward();
+        await page.waitForURL(base + "/");
+        await page.clock.runFor(100);
+        assert.equal(syncs, 1);
+        if (inFlight) {
+          assert.match(await page.locator(".sync-button").innerText(), /正在同步/);
+          await completeFirst!();
+        }
+        await page.getByRole("button", { name: "同步活动", exact: true }).waitFor();
+        await navigate("使用指南", "/guide");
+        await page.clock.fastForward(5 * 60_000);
+        assert.equal(syncs, 1);
+        await navigate("叠个饭首页", "/");
+        const manualSync = page.waitForResponse(response => response.url().endsWith("/api/sync"));
+        await page.getByRole("button", { name: "同步活动", exact: true }).click();
+        await manualSync;
+        await page.getByRole("button", { name: "同步活动", exact: true }).waitFor();
+        assert.equal(syncs, 2);
+        const timedSync = page.waitForResponse(response => response.url().endsWith("/api/sync"));
+        await page.clock.fastForward(5 * 60_000);
+        await timedSync;
+        assert.equal(syncs, 3);
+        await context.close();
+      }
+    } finally { await browser.close(); }
+  });
   await test("Successful automatic synchronization clears its old error while preserving other action errors", async () => {
     const { chromium } = await import("playwright-core");
     const browser = await chromium.launch({ channel: "chrome", headless: true });
@@ -615,10 +684,13 @@ try {
       await page.locator(".account-panel").filter({ has: page.getByRole("heading", { name: "歪麦霸王餐", exact: true }) })
         .getByRole("button", { name: "连接电脑微信", exact: true }).click();
       await page.getByRole("alert").getByText("歪麦连接失败", { exact: true }).waitFor();
-      const nextSync = page.waitForResponse(response => response.url().endsWith("/api/sync"));
       await page.getByRole("link", { name: "返回首页", exact: true }).click();
-      await nextSync;
       await page.locator(".sync-button").waitFor();
+      await page.clock.runFor(100);
+      assert.equal(syncs, 2);
+      const nextSync = page.waitForResponse(response => response.url().endsWith("/api/sync"));
+      await page.clock.fastForward(5 * 60_000);
+      await nextSync;
       await page.waitForFunction(() => !document.querySelector(".sync-button")?.textContent?.includes("正在同步"));
       assert.equal(syncs, 3);
       assert.match(await page.getByRole("alert").innerText(), /歪麦连接失败/);

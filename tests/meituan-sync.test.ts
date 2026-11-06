@@ -32,6 +32,10 @@ function browserFixture() {
     loads: 0,
     failRepeatedLoad: false,
     malformedIdentity: false,
+    identityStatus: 200,
+    expiredIdentity: false,
+    omitIdentity: false,
+    omitOffers: false,
     onNavigate: () => {},
     response(kind: "identity" | "offers" | "page", body: () => unknown, status = 200) {
       const path = kind === "identity" ? "getUserInfo" : kind === "offers" ? "queryPoiByRecallBiz" : "getPageModuleInfo";
@@ -63,14 +67,14 @@ function browserFixture() {
       if (url === "about:blank") return;
       fixture.loads++;
       fixture.onNavigate();
-      fixture.response("identity", () => {
+      if (!fixture.omitIdentity) fixture.response("identity", () => {
         if (fixture.malformedIdentity) throw new SyntaxError("private-malformed-body-canary");
         if (fixture.failRepeatedLoad && fixture.loads > 1)
           throw new Error("Protocol error (Network.getResponseBody): No resource with given identifier found");
-        return { ret: 0, data: { phone: "13800000000" } };
-      }).send();
+        return { ret: 0, data: { phone: fixture.expiredIdentity ? "" : "13800000000" } };
+      }, fixture.identityStatus).send();
       // DOM readiness precedes activity responses on the real page.
-      timers.push(setTimeout(() => fixture.response("offers", () => activity).send(), 20));
+      if (!fixture.omitOffers) timers.push(setTimeout(() => fixture.response("offers", () => activity).send(), 20));
       await Promise.resolve();
     },
   });
@@ -93,7 +97,8 @@ function browserFixture() {
 
 async function setup(t: TestContext) {
   // Equal millisecond timestamps must not merge two sync generations.
-  t.mock.method(Date, "now", () => 1_800_000_000_000);
+  let now = 1_800_000_000_000;
+  t.mock.method(Date, "now", () => now);
   const { fixture, browser } = browserFixture();
   t.mock.method(chromium, "launch", async () => browser as any);
   const id = randomBytes(32).toString("hex");
@@ -103,7 +108,7 @@ async function setup(t: TestContext) {
   session.meituanStorage = { cookies: [], origins: [] };
   await saveSession(id, session);
   t.after(() => closeMeituan(id));
-  return { id, fixture };
+  return { id, fixture, advance: (ms: number) => { now += ms; } };
 }
 
 try {
@@ -159,6 +164,67 @@ try {
       return true;
     });
     assert.deepEqual(await loadSession(id), before);
+  });
+
+  for (const missing of ["identity", "offers"] as const) {
+    await test(`Meituan retries one timed-out ${missing} response without accepting the abandoned load's responses`, async t => {
+      const { id, fixture, advance } = await setup(t);
+      let stale: ReturnType<typeof fixture.response>;
+      fixture.onNavigate = () => {
+        fixture.omitIdentity = fixture.loads === 1 && missing === "identity";
+        fixture.omitOffers = fixture.loads === 1 && missing === "offers";
+        if (fixture.loads === 1) {
+          stale = fixture.response("identity", () => ({ ret: 0, data: { phone: "" } }));
+          setTimeout(() => advance(30_001), 30);
+        } else stale.send();
+      };
+      const offers = await fetchMeituan(id, location, { radiusMeters: 7000 });
+      assert.equal(offers.length, 1);
+      assert.equal(fixture.loads, 2);
+      assert.equal(stale!.reads(), 0);
+    });
+  }
+
+  await test("Meituan stops after one timeout retry and preserves previously saved activities", async t => {
+    const { id, fixture, advance } = await setup(t);
+    const session = await loadSession(id);
+    session.offers.meituan = await fetchMeituan(id, location);
+    await saveSession(id, session);
+    const before = structuredClone(session);
+    fixture.omitOffers = true;
+    fixture.onNavigate = () => { setTimeout(() => advance(30_001), 30); };
+    await assert.rejects(fetchMeituan(id, location), error => {
+      assert.equal((error as any).statusCode, 504);
+      assert.equal((error as any).statusMessage, "美团活动加载超时，请稍后重试");
+      return true;
+    });
+    assert.equal(fixture.loads, 3);
+    assert.deepEqual(await loadSession(id), before);
+  });
+
+  await test("an expired Meituan identity fails promptly without waiting for offers or retrying login", async t => {
+    const { id, fixture, advance } = await setup(t);
+    fixture.expiredIdentity = true;
+    fixture.omitOffers = true;
+    fixture.onNavigate = () => { setTimeout(() => advance(30_001), 30); };
+    await assert.rejects(fetchMeituan(id, location), error => {
+      assert.equal((error as any).statusCode, 401);
+      assert.match((error as any).statusMessage, /美团登录已失效/);
+      return true;
+    });
+    assert.equal(fixture.loads, 1);
+  });
+
+  await test("Meituan does not retry an explicit official identity refusal", async t => {
+    const { id, fixture } = await setup(t);
+    fixture.identityStatus = 403;
+    fixture.omitOffers = true;
+    await assert.rejects(fetchMeituan(id, location), error => {
+      assert.equal((error as any).statusCode, 502);
+      assert.match((error as any).statusMessage, /美团身份接口拒绝访问/);
+      return true;
+    });
+    assert.equal(fixture.loads, 1);
   });
 } finally {
   if (previousDirectory === undefined) delete process.env.FOOD_DATA_DIR;
