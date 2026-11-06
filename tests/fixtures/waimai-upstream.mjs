@@ -98,7 +98,9 @@ globalThis.fetch = async (url, init) => {
     const token = headers.get("x-sivir");
     const rpc = headers.get("methodname");
     const native = headers.get("x-platform") === "Android";
-    if (native && new URL(String(url)).pathname !== "/g/pa")
+    if (headers.get("x-session-id")?.trimStart().startsWith("{"))
+      return new Response("Invalid client session header", { status: 403 });
+    if (native && (new URL(String(url)).pathname !== "/rpc" || headers.has("version")))
       return Response.json({ status: { code: 400, msg: "Invalid native gateway" } });
     const body = JSON.parse(String(init.body));
     if (native && !validSignature(headers))

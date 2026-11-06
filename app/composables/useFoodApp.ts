@@ -28,7 +28,7 @@ function createFoodApp() {
   const scheduleError = ref("");
   const busy = computed(() => actionBusy.value || (enrollingOfferIds.value.size ? "enroll" : ""));
   const syncing = ref(false),
-    notice = ref<{ text: string; error: boolean } | null>(null);
+    notice = ref<{ text: string; error: boolean; source?: "sync" } | null>(null);
   const filter = ref("all"),
     sort = ref("price");
   const bawangcanProvider = ref<BawangcanProvider>("xiaochan");
@@ -80,7 +80,7 @@ function createFoodApp() {
     clearInterval(syncTimer);
     clearInterval(scheduleTimer);
   });
-  function showError(error: any) {
+  function showError(error: any, source?: "sync") {
     notice.value = {
       text:
         error.data?.statusMessage ||
@@ -88,6 +88,7 @@ function createFoodApp() {
         error.message ||
         "操作失败，请重试",
       error: true,
+      ...(source ? { source } : {}),
     };
   }
   async function action(name: string, task: () => Promise<void>) {
@@ -189,10 +190,12 @@ function createFoodApp() {
         if ((r.errors.length || !automatic) && route.path === "/") notice.value = {
           text: r.errors.length ? r.errors.join("；") : r.message,
           error: r.errors.length > 0,
+          source: "sync",
         };
+        else if (automatic && route.path === "/" && notice.value?.source === "sync") notice.value = null;
     } catch (error: any) {
       if (mounted && revision === dataRevision && route.path === "/" &&
-        (!automatic || error.statusCode !== 429)) showError(error);
+        (!automatic || error.statusCode !== 429)) showError(error, "sync");
     } finally {
       pollActive = false;
       clearInterval(pollTimer);

@@ -317,6 +317,127 @@ test("Sync bounds order lookups to batches of 20 without querying untracked acti
   assert.deepEqual(empty, { updates: {}, errors: [] });
 });
 
+const queryBlocks = [
+  { statusCode: 502, statusMessage: "小蚕请求被拦截，请稍后重试", data: { xiaochanOutcome: "rejected", xiaochanFailure: "gateway-blocked" } },
+  { statusCode: 429, statusMessage: "小蚕请求频繁，请稍后重试", data: { xiaochanOutcome: "rejected" } },
+];
+
+function trackedSession(count: number, state: "enrolled" | "unknown" = "enrolled") {
+  const data = session();
+  data.xiaochanEnrollments = {};
+  data.offers.xiaochan = Array.from({ length: count }, (_, i) => {
+    const offer = { ...session().offers.xiaochan[0]!, id: `xiaochan:${i + 42}` };
+    data.xiaochanEnrollments![offer.id] = {
+      state, ...(state === "enrolled" ? { orderId: String(i + 9042) } : {}),
+      updatedAt: new Date(now.getTime() - 10_000).toISOString(),
+    };
+    return offer;
+  });
+  return data;
+}
+
+test("Sync stops remaining order batches and unknown lookups after a gateway block or rate limit", async () => {
+  for (const block of queryBlocks) {
+    const data = trackedSession(41);
+    data.offers.xiaochan.push({ ...data.offers.xiaochan[0]!, id: "xiaochan:100" });
+    data.xiaochanEnrollments!["xiaochan:100"] = { state: "unknown", updatedAt: now.toISOString() };
+    const original = structuredClone(data);
+    let calls = 0;
+    const result = await fetchXiaochanEnrollmentUpdates(data, data.offers.xiaochan, {
+      now, rpc: rpcWith(async request => {
+        calls++;
+        assert.equal(request.methodName, "SilkwormService.GetPromotionOrderList");
+        throw createError(block);
+      }),
+    });
+    assert.equal(calls, 1);
+    assert.deepEqual(result, { updates: {}, errors: [block.statusMessage] });
+    assert.deepEqual(data, original);
+  }
+});
+
+test("Sync retains confirmed updates when a later order batch is blocked", async () => {
+  for (const block of queryBlocks) {
+    const data = trackedSession(41);
+    const original = structuredClone(data);
+    let calls = 0;
+    const result = await fetchXiaochanEnrollmentUpdates(data, data.offers.xiaochan, {
+      now, rpc: rpcWith(async request => {
+        if (++calls > 1) throw createError(block);
+        const ids = request.body.ids as number[];
+        return { status: { code: 0 }, order_list: ids.map((id, i) => ({
+          promotion_order_id: id, store_platform: 1, order_status: i === 0 ? 4 : 0,
+        })) };
+      }),
+    });
+    assert.equal(calls, 2);
+    assert.equal(Object.keys(result.updates).length, 20);
+    assert.equal(result.updates["xiaochan:42"], null);
+    assert.deepEqual(result.updates["xiaochan:43"], { ...original.xiaochanEnrollments!["xiaochan:43"], updatedAt: now.toISOString() });
+    assert.equal(result.updates["xiaochan:62"], undefined);
+    assert.deepEqual(result.errors, [block.statusMessage]);
+    assert.deepEqual(data, original);
+  }
+});
+
+test("Sync preserves and deduplicates earlier lookup errors when a later batch is blocked", async () => {
+  for (const block of queryBlocks) {
+    const data = trackedSession(41);
+    const original = structuredClone(data);
+    let calls = 0;
+    const result = await fetchXiaochanEnrollmentUpdates(data, data.offers.xiaochan, {
+      now, rpc: rpcWith(async () => {
+        if (++calls > 1) throw createError(block);
+        return { status: { code: 0 }, order_list: [] };
+      }),
+    });
+    assert.equal(calls, 2);
+    assert.deepEqual(result, {
+      updates: {}, errors: ["小蚕报名状态同步失败，请重试", block.statusMessage],
+    });
+    assert.deepEqual(data, original);
+  }
+});
+
+test("Sync stops unknown detail lookups on a block without changing pending enrollment state", async () => {
+  for (const block of queryBlocks) {
+    for (const successfulLookups of [0, 1]) {
+      const data = trackedSession(3, "unknown");
+      const original = structuredClone(data);
+      let calls = 0;
+      const result = await fetchXiaochanEnrollmentUpdates(data, data.offers.xiaochan, {
+        now, rpc: rpcWith(async request => {
+          assert.equal(request.methodName, "SilkwormService.GetStorePromotionDetail");
+          if (++calls > successfulLookups) throw createError(block);
+          return { status: { code: 0 }, promotion_detail: { promotion_id: request.body.promotion_id, meituan_status: 1 },
+            order_list: [{ promotion_order_id: 9042, store_platform: 1, order_status: 0 }] };
+        }),
+      });
+      assert.equal(calls, successfulLookups + 1);
+      assert.equal(Object.keys(result.updates).length, successfulLookups);
+      if (successfulLookups) assert.deepEqual(result.updates["xiaochan:42"], { state: "enrolled", orderId: "9042", updatedAt: now.toISOString() });
+      assert.deepEqual(result.errors, [block.statusMessage]);
+      assert.deepEqual(data, original);
+    }
+  }
+});
+
+test("Unknown enrollment lookup preserves a blocking error without persisting or retrying", async () => {
+  for (const block of queryBlocks) {
+    const data = trackedSession(1, "unknown"), original = structuredClone(data);
+    const failure = createError(block);
+    let calls = 0;
+    await assert.rejects(enrollXiaochan(data, "xiaochan:42", {
+      now, persist: async () => assert.fail("Unexpected persistence"), rpc: rpcWith(async () => {
+        calls++;
+        throw failure;
+      }),
+    }), error => error === failure);
+    assert.equal(calls, 1);
+    assert.deepEqual(data, original);
+  }
+});
+
 test("Cancellation targets the saved order and clears only after official confirmation", async () => {
   const data = session();
   data.xiaochanEnrollments = { "xiaochan:42": { state: "enrolled", orderId: "9042", updatedAt: now.toISOString() } };

@@ -94,7 +94,8 @@ try {
       token: { access_token: accessToken, refresh_token: "private-wechat-refresh", created: Math.floor(Date.now() / 1000), expiry: Math.floor(Date.now() / 1000) + 3600 },
     };
     await setWeChatAppStorage("wx52ae177248081591", {
-      store_user: JSON.stringify(user), baseUrl: "https://gw.xiaocantech.com", sessionId: "private-wechat-session-id",
+      store_user: JSON.stringify(user), baseUrl: "https://gw.xiaocantech.com",
+      sessionId: JSON.stringify({ expire: Math.floor(Date.now() / 1000) + 1800, value: "private-wechat-session-id" }),
     });
   };
   const waimaiUserId = "b64c312a1c6b4a74b72668f0cab713aa";
@@ -572,6 +573,50 @@ try {
       }
     } finally { await browser.close(); }
   });
+  await test("Successful automatic synchronization clears its old error while preserving other action errors", async () => {
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ channel: "chrome", headless: true });
+    try {
+      const page = await browser.newPage();
+      await page.clock.install();
+      const dashboard = {
+        location: { label: "南宁", cityName: "南宁市", cityCode: 450103, latitude: 22.82, longitude: 108.36 },
+        connections: {
+          xiaochan: { state: "connected", label: "已登录", profile: { userId: "1" } },
+          waimai: { state: "disconnected", label: "未连接" },
+          meituan: { state: "disconnected", label: "未连接" },
+        },
+        offers: { xiaochan: [], waimai: [], meituan: [] }, updatedAt: {}, enrollmentSchedules: [],
+      };
+      let syncs = 0;
+      await page.route("**/api/**", async route => {
+        const path = new URL(route.request().url()).pathname;
+        if (path === "/api/sync") return route.fulfill({ json: {
+          data: dashboard, errors: ++syncs === 1 ? ["小蚕请求被拦截，请稍后重试"] : [], message: "同步完成",
+        } });
+        if (path === "/api/connections/waimai/wechat") return route.fulfill({
+          status: 502, json: { statusMessage: "歪麦连接失败" },
+        });
+        return route.fulfill({ json: dashboard });
+      });
+      await page.goto(base);
+      await page.getByRole("alert").getByText("小蚕请求被拦截，请稍后重试", { exact: true }).waitFor();
+      await page.clock.fastForward(5 * 60_000);
+      await page.getByRole("alert").waitFor({ state: "hidden" });
+      assert.equal(syncs, 2);
+      await page.getByRole("link", { name: "账号管理", exact: true }).click();
+      await page.locator(".account-panel").filter({ has: page.getByRole("heading", { name: "歪麦霸王餐", exact: true }) })
+        .getByRole("button", { name: "连接电脑微信", exact: true }).click();
+      await page.getByRole("alert").getByText("歪麦连接失败", { exact: true }).waitFor();
+      const nextSync = page.waitForResponse(response => response.url().endsWith("/api/sync"));
+      await page.getByRole("link", { name: "返回首页", exact: true }).click();
+      await nextSync;
+      await page.locator(".sync-button").waitFor();
+      await page.waitForFunction(() => !document.querySelector(".sync-button")?.textContent?.includes("正在同步"));
+      assert.equal(syncs, 3);
+      assert.match(await page.getByRole("alert").innerText(), /歪麦连接失败/);
+    } finally { await browser.close(); }
+  });
   await test("Waimai synchronization requires login and a city name", async () => {
     const anonymous = await freshCookie();
     await call("/api/location", { label: "收餐地址", cityName: "上海市", cityCode: 310000, latitude: 31.23, longitude: 121.47 }, "POST", anonymous);
@@ -724,7 +769,7 @@ try {
     [
       "waf-xiaochan-test-session",
       "connected",
-      "小蚕网关拦截，请检查网络连接",
+      "小蚕请求被拦截，请稍后重试",
     ],
     [
       "blocked-xiaochan-test-session",

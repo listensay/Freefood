@@ -89,6 +89,20 @@ test("Computer WeChat decoder retains the last selected value and honors deleted
   assert.throws(() => decodeWeChatXiaochanStorage(removed.main, removed.metadata, now), { statusCode: 401 });
 });
 
+test("Computer WeChat connection reads the session cache value and discards expired session IDs", () => {
+  for (const expiry of [now / 1000 + 1800, now / 1000]) {
+    const data = fixture({ entries: [
+      entry("store_user", JSON.stringify(user())),
+      entry("baseUrl", "https://gw.xiaocantech.com/rpc"),
+      entry("sessionId", JSON.stringify({ expire: expiry, value: "cached-wechat-session" })),
+    ] });
+    const result = decodeWeChatXiaochanStorage(data.main, data.metadata, now).account;
+    assert.equal(result.accessToken, "test-wechat-access-token");
+    assert.equal(result.sessionId, expiry * 1000 > now ? "cached-wechat-session" : undefined);
+    assert.equal(result.sessionIdExpiresAt, expiry * 1000 > now ? expiry * 1000 : undefined);
+  }
+});
+
 test("Computer WeChat decoder rejects checksums, unsupported metadata, size mismatch and wrong encryption keys", () => {
   const mutations: Array<(data: ReturnType<typeof fixture>) => void> = [
     data => { data.main[8] ^= 1; },

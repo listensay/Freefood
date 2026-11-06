@@ -2,7 +2,7 @@ import { createError } from "h3";
 import type { AccountProfile } from "../../shared/types";
 import { decodeWeChatStorage, readWeChatAppLogin } from "./wechat-storage";
 import { safeUrl } from "../../shared/utils/import";
-import { xiaochanAccountHeaders, xiaochanRpc, type XiaochanAccount } from "./xiaochan-rpc";
+import { decodeXiaochanSession, xiaochanAccountHeaders, xiaochanRpc, type XiaochanAccount } from "./xiaochan-rpc";
 
 export const XIAOCHAN_MINI_APP_ID = "wx52ae177248081591";
 
@@ -57,14 +57,14 @@ export function decodeWeChatXiaochanStorage(main: Buffer, metadata: Buffer, now 
     const system = values.get("store_system");
     const model = record(system) && header(system.model, 100) && header(system.brand, 100)
       ? `${system.model} ${system.brand}` : undefined;
-    const sessionId = values.get("sessionId");
+    const session = decodeXiaochanSession(values.get("sessionId"), undefined, now);
     return {
       account: {
         silkId, userId, accessToken: user.token.access_token, expiresAt: expiry * 1000,
         ...(header(user.token.refresh_token) ? { refreshToken: user.token.refresh_token } : {}),
         platform: "mini",
         version: "3.22.2.83",
-        ...(header(sessionId, 256) ? { sessionId } : {}),
+        ...session,
         ...(model ? { model } : {}),
       },
     };

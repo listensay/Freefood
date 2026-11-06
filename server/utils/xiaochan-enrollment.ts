@@ -23,6 +23,13 @@ const positiveId = (value: unknown): string | undefined => {
   return text;
 };
 
+function queryBlockMessage(error: any): string | undefined {
+  if (error.statusCode === 429)
+    return error.statusMessage || "小蚕请求频繁，请稍后重试";
+  if (error.data?.xiaochanFailure === "gateway-blocked")
+    return error.statusMessage || "小蚕请求被拦截，请稍后重试";
+}
+
 export async function fetchXiaochanEnrollmentUpdates(
   session: LocalSession,
   offers: Offer[],
@@ -62,6 +69,8 @@ export async function fetchXiaochanEnrollmentUpdates(
       }
     } catch (error: any) {
       if (error.statusCode === 401) throw error;
+      const blocked = queryBlockMessage(error);
+      if (blocked) return { updates, errors: [...new Set([...errors, blocked])] };
       errors.push("小蚕报名状态同步失败，请重试");
     }
   }
@@ -72,6 +81,8 @@ export async function fetchXiaochanEnrollmentUpdates(
       updates[offer.id] = lookup.xiaochanEnrollments![offer.id]!;
     } catch (error: any) {
       if (error.statusCode === 401) throw error;
+      const blocked = queryBlockMessage(error);
+      if (blocked) return { updates, errors: [...new Set([...errors, blocked])] };
       errors.push("小蚕报名待确认");
     }
   }
@@ -131,6 +142,7 @@ export async function enrollXiaochan(
         await persist();
         throw error;
       }
+      if (queryBlockMessage(error)) throw error;
       throw createError({ statusCode: 409, statusMessage: "报名待确认" });
     }
     const matching = Array.isArray(detail?.order_list) ? detail.order_list.filter((order: any) =>

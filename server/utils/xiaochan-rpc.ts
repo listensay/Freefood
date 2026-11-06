@@ -11,6 +11,7 @@ export interface XiaochanAccount {
   platform?: "Android" | "mini";
   version?: string;
   sessionId?: string;
+  sessionIdExpiresAt?: number;
   model?: string;
 }
 
@@ -23,6 +24,53 @@ interface XiaochanRpcRequest {
 }
 
 const md5 = (text: string) => createHash("md5").update(text).digest("hex");
+
+export function decodeXiaochanSession(
+  value: unknown,
+  expiresAt?: number,
+  now = Date.now(),
+): Pick<XiaochanAccount, "sessionId" | "sessionIdExpiresAt"> | undefined {
+  if (typeof value !== "string") return;
+  if (value.trimStart().startsWith("{")) {
+    try {
+      const cache = JSON.parse(value);
+      if (!cache || typeof cache !== "object" || Array.isArray(cache)) return;
+      value = cache.value;
+      if (cache.expire !== undefined && cache.expire !== null && cache.expire !== "" && cache.expire !== 0) {
+        const seconds = Number(cache.expire);
+        if (!Number.isSafeInteger(seconds) || !Number.isSafeInteger(seconds * 1000)) return;
+        expiresAt = seconds * 1000;
+      }
+    } catch {
+      return;
+    }
+  }
+  if (typeof value !== "string" || !value || value.length > 256 ||
+    value.trim() !== value || /[\r\n\u0000{}\[\]]/.test(value) ||
+    (expiresAt !== undefined && (!Number.isSafeInteger(expiresAt) || expiresAt <= now))) return;
+  return { sessionId: value, ...(expiresAt !== undefined ? { sessionIdExpiresAt: expiresAt } : {}) };
+}
+
+const generatedSessions = new Map<string, { id: string; expiresAt: number }>();
+
+function requestSessionId(account: XiaochanAccount): string {
+  const now = Date.now();
+  // Older saved accounts contain the serialized WeChat cache entry, not its value.
+  const saved = decodeXiaochanSession(account.sessionId, account.sessionIdExpiresAt, now);
+  if (saved?.sessionId) return saved.sessionId;
+  const key = createHash("sha256").update(JSON.stringify([
+    account.platform || "Android", account.silkId, account.userId, account.accessToken,
+  ])).digest("hex");
+  const current = generatedSessions.get(key);
+  if (current && current.expiresAt > now) return current.id;
+  for (const [key, session] of generatedSessions)
+    if (session.expiresAt <= now) generatedSessions.delete(key);
+  if (generatedSessions.size >= 100) generatedSessions.delete(generatedSessions.keys().next().value!);
+  // The mini-program stores a newly generated session for 1,800 seconds.
+  const session = { id: randomUUID(), expiresAt: now + 30 * 60_000 };
+  generatedSessions.set(key, session);
+  return session.id;
+}
 
 export function xiaochanAccountHeaders(account: XiaochanAccount): Record<string, string> {
   if (!account || typeof account.silkId !== "string" || !/^[1-9]\d{0,11}$/.test(account.silkId) ||
@@ -39,7 +87,7 @@ export function xiaochanAccountHeaders(account: XiaochanAccount): Record<string,
     "x-annie": "XC",
     "x-version": account.version || "3.22.2.83",
     "x-app-sr": "20",
-    "x-session-id": account.sessionId || randomUUID(),
+    "x-session-id": requestSessionId(account),
     ...(account.model ? { "x-model": account.model } : {}),
     referer: "https://servicewechat.com/wx52ae177248081591/814/page-frame.html",
     "user-agent": "Mozilla/5.0 MicroMessenger/7.0.20.1781 MacWechat/3.8.7",
@@ -54,7 +102,7 @@ export function xiaochanAccountHeaders(account: XiaochanAccount): Record<string,
     "x-version": "3.22.2.5",
     "x-app-sr": "16",
     "x-channel": "xiaocan",
-    "x-session-id": randomUUID(),
+    "x-session-id": requestSessionId(account),
     "user-agent": "XC;Android;3.22.2;",
   };
 }
@@ -78,11 +126,12 @@ export function xiaochanRequestHeaders(
     ? `${uuid.slice(0, middle)}${identity}${uuid.slice(middle, randomLength)}`
     : `${uuid.slice(0, 4)}${identity}${uuid.slice(4, 16 - identity.length)}`;
   const version = headers["x-version"] || headers.version || (native ? "3.22.2.5" : "3.21.7.82");
+  const { version: _legacyVersion, ...requestHeaders } = headers;
   return {
-    ...headers,
+    ...requestHeaders,
     serverName,
     methodName,
-    version,
+    ...(native ? {} : { version }),
     "x-version": version,
     "x-nami": nonce,
     "x-garen": timestamp,
@@ -92,12 +141,43 @@ export function xiaochanRequestHeaders(
   };
 }
 
-function rpcError(statusCode: number, statusMessage: string, rejected: boolean) {
+function rpcError(statusCode: number, statusMessage: string, rejected: boolean, gatewayBlocked = false) {
   return createError({
     statusCode,
     statusMessage,
-    data: { xiaochanOutcome: rejected ? "rejected" : "unknown" },
+    data: {
+      xiaochanOutcome: rejected ? "rejected" : "unknown",
+      ...(gatewayBlocked ? { xiaochanFailure: "gateway-blocked" } : {}),
+    },
   });
+}
+
+export async function isXiaochanGatewayBlock(response: Response): Promise<boolean> {
+  if (
+    response.status !== 403 ||
+    !response.headers.get("content-type")?.toLowerCase().includes("text/html") ||
+    !response.body
+  )
+    return false;
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > 64_000) return false;
+      chunks.push(value);
+    }
+    const html = Buffer.concat(chunks).toString("utf8");
+    return /WAF拦截页面/.test(html) && /腾讯云\s*WAF/i.test(html);
+  } catch {
+    return false;
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
 }
 
 export async function xiaochanRpc(
@@ -106,8 +186,8 @@ export async function xiaochanRpc(
 ): Promise<Record<string, any>> {
   let response: Response;
   try {
-    response = await fetcher(request.headers["x-platform"] === "Android"
-      ? "https://gw.xiaocantech.com/g/pa" : "https://gw.xiaocantech.com/rpc", {
+    // /g/pa is the App bootstrap endpoint; business RPCs use /rpc.
+    response = await fetcher("https://gw.xiaocantech.com/rpc", {
       method: "POST",
       headers: xiaochanRequestHeaders(request.headers, request.serverName, request.methodName, request.location),
       body: JSON.stringify(request.headers["x-platform"] === "mini"
@@ -119,12 +199,15 @@ export async function xiaochanRpc(
     throw rpcError(502, "小蚕连接超时或网络异常，请稍后重试", false);
   }
   if (!response.ok) {
+    const gatewayBlocked = await isXiaochanGatewayBlock(response);
     throw rpcError(
       response.status === 401 ? 401 : response.status === 429 ? 429 : 502,
       response.status === 401 ? "小蚕登录已失效，请重新登录"
         : response.status === 429 ? "小蚕请求频繁，请稍后重试"
-          : "小蚕请求失败，请稍后重试",
+          : gatewayBlocked ? "小蚕请求被拦截，请稍后重试"
+            : "小蚕请求失败，请稍后重试",
       response.status >= 400 && response.status < 500,
+      gatewayBlocked,
     );
   }
   let data: any;

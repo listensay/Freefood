@@ -915,7 +915,7 @@ test("Xiaochan identifies only explicit WAF pages without retrying or exposing t
     [
       "<title>WAF拦截页面</title><p>腾讯云WAF 访问拦截</p><p>private-request-id</p>",
       "text/html; charset=UTF-8",
-      "小蚕网关拦截，请检查网络连接",
+      "小蚕请求被拦截，请稍后重试",
     ],
     [
       "<title>Forbidden</title><p>private-request-id</p>",

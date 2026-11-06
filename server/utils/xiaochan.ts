@@ -3,7 +3,7 @@ import type { LocationSettings, Offer, SyncScope } from "../../shared/types";
 import { safeUrl } from "../../shared/utils/import";
 import { collectActivityPages, type ActivityPage } from "./activity-pages";
 import { toCents } from "../../shared/utils/pricing";
-import { xiaochanAccountHeaders, xiaochanRequestHeaders, type XiaochanAccount } from "./xiaochan-rpc";
+import { isXiaochanGatewayBlock, xiaochanAccountHeaders, xiaochanRequestHeaders, type XiaochanAccount } from "./xiaochan-rpc";
 
 const endpoint = "https://gw.xiaocantech.com/rpc";
 
@@ -127,34 +127,6 @@ function formatTimestamp(value: unknown): string | undefined {
   return new Date(seconds * 1000).toISOString();
 }
 
-async function isXiaochanGatewayBlock(response: Response): Promise<boolean> {
-  if (
-    response.status !== 403 ||
-    !response.headers.get("content-type")?.toLowerCase().includes("text/html") ||
-    !response.body
-  )
-    return false;
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > 64_000) return false;
-      chunks.push(value);
-    }
-    const html = Buffer.concat(chunks).toString("utf8");
-    return /WAF拦截页面/.test(html) && /腾讯云\s*WAF/i.test(html);
-  } catch {
-    return false;
-  } finally {
-    await reader.cancel().catch(() => {});
-    reader.releaseLock();
-  }
-}
-
 async function fetchXiaochanPage(
   headers: Record<string, string>,
   location: LocationSettings,
@@ -174,8 +146,7 @@ async function fetchXiaochanPage(
   };
   let response: Response;
   try {
-    response = await fetch(headers["x-platform"] === "Android"
-      ? "https://gw.xiaocantech.com/g/pa" : endpoint, {
+    response = await fetch(endpoint, {
       method: "POST",
       headers: outgoing,
       redirect: "error",
@@ -190,7 +161,7 @@ async function fetchXiaochanPage(
         scene: 1,
         is_show_mt: true,
         ...(headers["x-platform"] === "Android" ? {} : { app_id: 20 }),
-        ...(headers["x-platform"] === "Android" && pagePvId ? { page_pv_id: pagePvId } : {}),
+        ...(pagePvId ? { page_pv_id: pagePvId } : {}),
       }),
     });
   } catch {
@@ -207,7 +178,7 @@ async function fetchXiaochanPage(
         response.status === 401
           ? "小蚕登录已失效，请重新登录"
           : gatewayBlocked
-            ? "小蚕网关拦截，请检查网络连接"
+            ? "小蚕请求被拦截，请稍后重试"
             : response.status === 403
               ? "小蚕拒绝同步请求"
               : response.status === 429
