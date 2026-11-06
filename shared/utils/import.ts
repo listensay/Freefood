@@ -150,9 +150,3 @@ export function safeUrl(value?: string): string | undefined {
     return undefined;
   }
 }
-
-export function csvCell(value: string | number): string {
-  let text = String(value);
-  if (/^[\s]*[=+\-@\t\r]/.test(text)) text = `'${text}`;
-  return `"${text.replaceAll('"', '""')}"`;
-}

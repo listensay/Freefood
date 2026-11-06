@@ -446,6 +446,132 @@ try {
     assert.equal(result.data.waimaiAccount, undefined);
     assert.equal((await call("/api/sync", { provider: "waimai" })).status, 429);
   });
+  await test("Switching providers can immediately sync Waimai while Xiaochan retains its own cooldown", async () => {
+    const snapshot = await (await fetch(base + "/api/dashboard")).json();
+    snapshot.xiaochanAccount = { silkId: "123456789", userId: "6789", accessToken: "corrected-xiaochan-test-session" };
+    snapshot.waimaiAccount = { userId: waimaiUserId, uid: waimaiUid, token: "wechat-waimai-test-success" };
+    snapshot.connections.xiaochan = { state: "connected", label: "已登录" };
+    snapshot.connections.waimai = { state: "connected", label: "已登录" };
+    snapshot.location = { label: "南宁", cityName: "南宁市", cityCode: 450103, latitude: 22.82, longitude: 108.36 };
+    const both = await seedSession(snapshot);
+    const xiaochan = await call("/api/sync", { provider: "xiaochan" }, "POST", both);
+    assert.equal(xiaochan.status, 200);
+    const previous = (await xiaochan.json()).data;
+    const waimai = await call("/api/sync", { provider: "waimai" }, "POST", both);
+    assert.equal(waimai.status, 200);
+    const result = await waimai.json();
+    assert.deepEqual(result.errors, []);
+    assert.equal(result.data.offers.waimai.length, 1);
+    assert.deepEqual(result.data.offers.xiaochan, previous.offers.xiaochan);
+    assert.equal((await call("/api/sync", { provider: "waimai" }, "POST", both)).status, 429);
+    assert.equal((await call("/api/sync", { provider: "xiaochan" }, "POST", both)).status, 429);
+  });
+  await test("A completed Waimai sync is saved before another platform finishes", async () => {
+    const snapshot = await (await fetch(base + "/api/dashboard")).json();
+    snapshot.xiaochanAccount = { silkId: "123456789", userId: "6789", accessToken: "wechat-test-slow-sync", platform: "mini" };
+    snapshot.waimaiAccount = { userId: waimaiUserId, uid: waimaiUid, token: "wechat-waimai-test-success" };
+    snapshot.connections.xiaochan = { state: "connected", label: "已登录" };
+    snapshot.connections.waimai = { state: "connected", label: "已登录" };
+    snapshot.location = { label: "南宁", cityName: "南宁市", cityCode: 450103, latitude: 22.82, longitude: 108.36 };
+    const c = await seedSession(snapshot);
+    let finished = false;
+    const syncing = call("/api/sync", {}, "POST", c).then(response => { finished = true; return response.json(); });
+    let data: any;
+    for (let i = 0; i < 20; i++) {
+      data = await (await fetch(base + "/api/dashboard", { headers: { cookie: c } })).json();
+      if (data.offers.waimai.length) break;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    assert.equal(data.offers.waimai.length, 1);
+    assert.equal(data.offers.xiaochan.length, 0);
+    assert.equal(finished, false);
+    const result = await syncing;
+    assert.deepEqual(result.errors, []);
+    assert.equal(result.data.offers.waimai.length, 1);
+    assert.equal(result.data.offers.xiaochan.length, 1);
+  });
+  await test("A running Xiaochan sync does not block a separate Waimai sync", async () => {
+    const snapshot = await (await fetch(base + "/api/dashboard")).json();
+    snapshot.xiaochanAccount = { silkId: "123456789", userId: "6789", accessToken: "wechat-test-slow-sync", platform: "mini" };
+    snapshot.waimaiAccount = { userId: waimaiUserId, uid: waimaiUid, token: "wechat-waimai-test-success" };
+    snapshot.connections.xiaochan = { state: "connected", label: "已登录" };
+    snapshot.connections.waimai = { state: "connected", label: "已登录" };
+    snapshot.location = { label: "南宁", cityName: "南宁市", cityCode: 450103, latitude: 22.82, longitude: 108.36 };
+    const c = await seedSession(snapshot);
+    let finished = false;
+    const pending = call("/api/sync", { provider: "xiaochan" }, "POST", c).then(response => { finished = true; return response.json(); });
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const waimai = await call("/api/sync", { provider: "waimai" }, "POST", c);
+    assert.equal(waimai.status, 200);
+    assert.equal((await waimai.json()).data.offers.waimai.length, 1);
+    assert.equal(finished, false);
+    const result = await pending;
+    assert.equal(result.data.offers.waimai.length, 1);
+  });
+  await test("Combination switches sync Waimai immediately and wait for an in-flight Xiaochan sync", async () => {
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ channel: "chrome", headless: true });
+    try {
+      for (const inFlight of [false, true]) {
+        const context = await browser.newContext();
+        const page = await context.newPage();
+        const collectedAt = new Date().toISOString();
+        const activity = { category: "美食", inventory: 3, distanceMeters: 1000, requirement: "无需评价",
+          source: "live", collectedAt, rule: { kind: "fixed", thresholdCents: 2000, cashbackCents: 1500 } };
+        const waimai = { ...activity, provider: "waimai", id: "waimai:store:sku", name: "歪麦测试（同一分店）" };
+        const dashboard: any = {
+          location: { label: "南宁", cityName: "南宁市", cityCode: 450103, latitude: 22.82, longitude: 108.36 },
+          connections: {
+            xiaochan: { state: "connected", label: "已登录", profile: { userId: "1" } },
+            waimai: { state: "connected", label: "已登录", profile: { userId: "2" } },
+            meituan: { state: "disconnected", label: "未连接" },
+          },
+          offers: { xiaochan: [], waimai: [], meituan: [{ ...waimai, provider: "meituan", id: "meituan:1" }] },
+          updatedAt: {}, enrollmentSchedules: [],
+        };
+        const requested: string[] = [];
+        let completeFirst: (() => Promise<void>) | undefined;
+        let completeWaimai: (() => Promise<void>) | undefined;
+        await page.route("**/api/**", async route => {
+          if (route.request().url().endsWith("/api/sync")) {
+            const { provider } = route.request().postDataJSON();
+            requested.push(provider);
+            if (inFlight && requested.length === 1) {
+              completeFirst = () => route.fulfill({ json: { data: dashboard, errors: [], message: "同步完成" } });
+              return;
+            }
+            if (provider === "waimai") {
+              dashboard.offers.waimai = [waimai];
+              if (!inFlight) {
+                completeWaimai = () => route.fulfill({ json: { data: dashboard, errors: [], message: "同步完成" } });
+                return;
+              }
+            }
+            await route.fulfill({ json: { data: dashboard, errors: [], message: "同步完成" } });
+          } else await route.fulfill({ json: dashboard });
+        });
+        const firstRequest = page.waitForRequest(request => request.url().endsWith("/api/sync"));
+        await page.goto(base);
+        await firstRequest;
+        if (!inFlight) await page.waitForFunction(() => !document.querySelector(".sync-button")?.textContent?.includes("正在同步"));
+        await page.getByRole("button", { name: "歪麦", exact: true }).click();
+        if (inFlight) {
+          assert.deepEqual(requested, ["xiaochan"]);
+          await completeFirst!();
+        }
+        await page.locator(".store-card").waitFor();
+        if (!inFlight) {
+          assert.match(await page.locator(".sync-button").innerText(), /正在同步/);
+          await completeWaimai!();
+        }
+        assert.deepEqual(requested, ["xiaochan", "waimai"]);
+        assert.equal(await page.locator(".store-card h3").innerText(), waimai.name);
+        assert.equal(await page.locator(".store-card .match-status").count(), 0);
+        assert.doesNotMatch(await page.locator(".store-card").innerText(), /分店待核验/);
+        await context.close();
+      }
+    } finally { await browser.close(); }
+  });
   await test("Waimai synchronization requires login and a city name", async () => {
     const anonymous = await freshCookie();
     await call("/api/location", { label: "收餐地址", cityName: "上海市", cityCode: 310000, latitude: 31.23, longitude: 121.47 }, "POST", anonymous);
@@ -501,7 +627,7 @@ try {
       assert.equal(data.offers.waimai[0].id, "waimai:001");
     });
   }
-  for (const token of ["expired-test-token", "network-failure-token"]) {
+  for (const token of ["expired-test-token", "network-failure-token", "verification-test-token"]) {
     await test(`Waimai ${token} preserves the last successful dataset`, async () => {
       const c = await seededWaimai(await freshCookie(), token);
       await call("/api/location", { label: "收餐地址", cityName: "上海市", cityCode: 310000, latitude: 31.23, longitude: 121.47 }, "POST", c);
@@ -510,6 +636,8 @@ try {
       assert.equal(result.errors.length, 1);
       assert.equal(result.data.offers.waimai[0].id, "waimai:001");
       assert.equal(result.data.connections.waimai.state, token === "expired-test-token" ? "expired" : "connected");
+      if (token === "verification-test-token")
+        assert.deepEqual(result.errors, ["请在电脑微信的歪麦小程序中完成验证后重试"]);
     });
   }
   await test("disconnecting Waimai clears only its credentials and activities", async () => {
@@ -891,8 +1019,7 @@ try {
       assert.equal(firstBounds.height, secondBounds.height);
       await controls.locator("button").nth(1).hover();
       assert.equal(await controls.locator("button").nth(1).evaluate(element => getComputedStyle(element).textDecorationLine), "none");
-      await page.getByRole("button", { name: "导出结果" }).hover();
-      assert.equal(await page.getByRole("button", { name: "导出结果" }).evaluate(element => getComputedStyle(element).textDecorationLine), "none");
+      assert.equal(await page.getByRole("button", { name: "导出结果" }).count(), 0);
       if (process.env.FOOD_UI_SCREENSHOTS) await page.screenshot({ path: "/tmp/food-schedule-desktop.png", fullPage: true });
       await buttons.nth(0).click();
       await page.waitForFunction(() => document.querySelectorAll('.enrollment-button[aria-busy="true"]').length === 2);

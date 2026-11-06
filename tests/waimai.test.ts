@@ -287,6 +287,12 @@ function mockTransport(
     assert.equal(body.userLatitude, String(location.latitude));
     assert.equal(body.userLongitude, String(location.longitude));
     assert.equal(body.limit, 15);
+    assert.deepEqual(body.userTypes, [1, 2, 3, 4]);
+    assert.equal(body.version, 3);
+    assert.equal(body.overbearListFlag, 1);
+    assert.equal(body.takeawayPlatform, "meituan");
+    assert.equal(body.overbearFoodType, 1);
+    assert.deepEqual(body.overbearFoodTypes, [1]);
     assert.deepEqual(body.scrollPageData, pages && count > 2
       ? (pages[count - 3] as any).data.scrollPageData : null);
     const current = pages ? pages[count - 2] : result;
@@ -362,6 +368,35 @@ test("Waimai radius sync follows encrypted cursors and keeps distinct activity S
     offers.map((offer) => offer.distanceMeters),
     [1200, 7000, 7000],
   );
+});
+test("Waimai accepts official zero success codes and stops on hasMore=false despite a retained cursor", async () => {
+  for (const code of [0, "0"]) {
+    const result = await fetchWaimai(account, location, mockTransport("private-token", true, {
+      code, data: { data: [store], scrollPageData: { page: 2 }, hasMore: false },
+    } as any), { radiusMeters: 7000 });
+    assert.equal(result.length, 1);
+  }
+});
+test("Waimai rejects missing and null status codes instead of treating them as success", async () => {
+  for (const code of [undefined, null, "", false]) {
+    await assert.rejects(fetchWaimai(account, location, mockTransport("private-token", false, {
+      code, data: { data: [store], scrollPageData: null },
+    } as any)), { statusCode: 502 });
+  }
+});
+test("Waimai cannot mark a partial scan complete when the server reports more rows without a cursor", async () => {
+  await assert.rejects(fetchWaimai(account, location, mockTransport("private-token", false, {
+    code: 200, data: { data: [store], scrollPageData: null, hasMore: true },
+  } as any), { radiusMeters: 7000 }), { statusCode: 502 });
+});
+test("Waimai stops on official verification requests and presents an actionable message without retrying", async () => {
+  for (const code of [13001, 13002]) {
+    await assert.rejects(fetchWaimai(account, location, mockTransport("private-token", false, {
+      code, data: { antiCrawlerResult: { reqBizType: "private-upstream-challenge" } },
+    } as any), { radiusMeters: 7000 }), (error: any) =>
+      error.statusCode === 422 && error.statusMessage === "请在电脑微信的歪麦小程序中完成验证后重试" &&
+      !error.message.includes("private-upstream-challenge"));
+  }
 });
 test("Waimai transport rejects missing city, expired login, invalid configuration and network errors", async () => {
   await assert.rejects(

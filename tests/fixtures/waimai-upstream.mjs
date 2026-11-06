@@ -67,6 +67,8 @@ globalThis.fetch = async (url, init) => {
     if (token === "expired-test-token") return Response.json({ code: 401 });
     if (token === "network-failure-token")
       throw new Error("upstream unavailable");
+    if (token === "verification-test-token")
+      return Response.json({ code: 13001, data: { antiCrawlerResult: { reqBizType: "private-challenge" } } });
     return Response.json({
       code: 200,
       data: {

@@ -534,7 +534,7 @@ code {
   max-width: min(300px, calc(100vw - 40px));
   list-style: none;
   margin: 0;
-  padding: 8px;
+  padding: 0;
   background: var(--color-canvas);
   border: 1px solid var(--color-hairline-soft);
   border-radius: var(--radius-md);
@@ -674,8 +674,8 @@ code {
 }
 .store-main {
   display: flex;
-  gap: 12px;
-  align-items: flex-start;
+  gap: 18px;
+  align-items: center;
   position: relative;
 }
 .store-picture {
@@ -729,8 +729,8 @@ code {
 }
 .rebate-lines {
   display: grid;
-  gap: 12px;
-  margin-top: var(--spacing-lg);
+  gap: 20px;
+  margin-top: var(--spacing-xl);
 }
 .rebate-lines > div {
   display: flex;
@@ -745,6 +745,20 @@ code {
   font-weight: 500;
   margin-left: auto;
   text-align: right;
+}
+.rebate-provider {
+  display: grid;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.rebate-provider-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.rebate-inventory {
+  padding-left: 13px;
+  font-size: 11px;
 }
 .provider-dot {
   width: 6px;
@@ -764,22 +778,21 @@ code {
   background: var(--color-ink);
 }
 .store-conditions {
-  display: flex;
-  gap: 4px 12px;
-  flex-wrap: wrap;
-  margin-top: 16px;
-  margin-bottom: 20px;
+  display: grid;
+  gap: 8px;
+  margin-top: 24px;
+  margin-bottom: 24px;
   font-size: 11px;
   color: var(--color-muted);
 }
 .card-bottom {
-  border-top: 1px solid var(--color-hairline-soft);
-  margin-top: auto;
-  padding: 16px 0 20px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
+    border-top: 1px solid var(--color-hairline-soft);
+    margin-top: auto;
+    padding: 20px 0 24px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 16px;
 }
 .net-price > span {
   font-size: 12px;
@@ -816,7 +829,7 @@ code {
   gap: 3px;
   color: var(--color-primary-active);
   font-size: 28px;
-  margin-top: 4px;
+  margin-top: 18px;
   font-weight: 600;
   line-height: 1.3;
 }
@@ -837,6 +850,14 @@ code {
   gap: 8px;
   flex-shrink: 0;
   margin-left: auto;
+}
+.schedule-enrollment-button:not(:disabled) {
+  background: #222222;
+  color: white;
+}
+.schedule-enrollment-button:hover:not(:disabled),
+.schedule-enrollment-button:active:not(:disabled) {
+  background: color-mix(in srgb, var(--color-primary) 16%, var(--color-canvas));
 }
 .card-bottom:has(.enrollment-actions) {
   flex-wrap: wrap;
@@ -1351,10 +1372,6 @@ dialog[open] {
   }
   .results-title h2 > span {
     font-size: 14px;
-  }
-  .results-title .text-button {
-    font-size: 12px;
-    padding-right: 0;
   }
   .secondary-filters {
     padding-block: 16px;

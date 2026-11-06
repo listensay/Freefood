@@ -30,6 +30,7 @@ export interface LocalSession extends DashboardData {
   meituanStorage?: unknown;
   meituanAccountId?: string;
   lastSync?: number;
+  lastSyncByProvider?: Partial<Record<Provider, number>>;
 }
 
 const directory = resolve(process.env.FOOD_DATA_DIR || ".data/food");

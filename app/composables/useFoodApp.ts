@@ -46,6 +46,7 @@ function createFoodApp() {
   let refreshingSchedules = false;
   let mounted = false;
   let dataRevision = 0;
+  let pendingCombinationSync = false;
   const refreshingProfiles = new Set<BawangcanProvider>();
   watch(() => route.path, () => {
     filter.value = "all";
@@ -100,6 +101,7 @@ function createFoodApp() {
       showError(error);
     } finally {
       actionBusy.value = "";
+      if (pendingCombinationSync) void sync(true);
     }
   }
   const post = <T,>(url: string, body?: Record<string, unknown>) =>
@@ -163,14 +165,25 @@ function createFoodApp() {
       return;
     }
     syncing.value = true;
+    pendingCombinationSync = false;
+    const provider = bawangcanProvider.value;
     const revision = dataRevision;
+    let polling = false, pollActive = true;
+    const pollTimer = setInterval(async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const latest = await $fetch<DashboardData>("/api/dashboard", { timeout: 10_000 });
+        if (pollActive && mounted && revision === dataRevision) data.value = latest;
+      } catch {} finally { polling = false; }
+    }, 2000);
     if (!automatic) notice.value = null;
     try {
         const r = await post<{
           data: DashboardData;
           errors: string[];
           message: string;
-        }>("/api/sync", { provider: bawangcanProvider.value });
+        }>("/api/sync", { provider });
         if (!mounted || revision !== dataRevision) return;
         data.value = r.data;
         if ((r.errors.length || !automatic) && route.path === "/") notice.value = {
@@ -181,7 +194,10 @@ function createFoodApp() {
       if (mounted && revision === dataRevision && route.path === "/" &&
         (!automatic || error.statusCode !== 429)) showError(error);
     } finally {
+      pollActive = false;
+      clearInterval(pollTimer);
       syncing.value = false;
+      if (mounted && (pendingCombinationSync || provider !== bawangcanProvider.value)) void sync(true);
     }
   }
   async function connectComputerWeChat(provider: BawangcanProvider) {
@@ -241,6 +257,7 @@ function createFoodApp() {
     } finally {
       enrollingOfferIds.value.delete(offerId);
       delete enrollmentActions.value[offerId];
+      if (pendingCombinationSync) void sync(true);
     }
   }
   async function enrollXiaochan(offer: Offer) {
@@ -299,11 +316,14 @@ function createFoodApp() {
     });
   }
   function changeCombination(provider: BawangcanProvider) {
+    if (provider === bawangcanProvider.value) return;
     bawangcanProvider.value = provider;
     try {
       localStorage.setItem("food-bawangcan-provider", provider);
     } catch {}
     filter.value = "all";
+    pendingCombinationSync = true;
+    if (mounted && loaded.value) void sync(true);
   }
   function openLocation() {
     locationError.value = "";

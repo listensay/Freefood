@@ -12,7 +12,7 @@ import {
   suggestedPaidCents,
 } from "../shared/utils/pricing";
 import { groupStoreMatches, matchStores } from "../shared/utils/matching";
-import { parseOffers, csvCell } from "../shared/utils/import";
+import { parseOffers } from "../shared/utils/import";
 import {
   normalizeXiaochan,
   fetchXiaochan,
@@ -517,10 +517,6 @@ test("JSON import validates money, unique IDs, time, inventory and safe URLs", (
   assert.throws(() =>
     parseOffers([{ ...row, rule: { ...m.rule, ratioBps: 35000 } }], "meituan"),
   );
-});
-test("CSV protects against spreadsheet formula injection", () => {
-  assert.equal(csvCell('=HYPERLINK("x")'), '"\'=HYPERLINK(""x"")"');
-  assert.equal(csvCell("-3.75"), '"\'-3.75"');
 });
 test("Xiaochan adapter excludes Eleme and affiliate commission to avoid false stacking", () => {
   const row = {

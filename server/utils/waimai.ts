@@ -132,8 +132,11 @@ async function request(
   return response;
 }
 
-function checkStatus(data: any, expected: number) {
-  if (Number(data?.code) === expected) return;
+function checkStatus(data: any, expected: number | number[]) {
+  if (["number", "string"].includes(typeof data?.code) && /^\d+$/.test(String(data.code)) &&
+    (Array.isArray(expected) ? expected : [expected]).includes(Number(data.code))) return;
+  if ([13001, 13002].includes(Number(data?.code)))
+    throw createError({ statusCode: 422, statusMessage: "请在电脑微信的歪麦小程序中完成验证后重试" });
   if ([-3, 401, 403].includes(Number(data?.code)))
     throw createError({
       statusCode: 401,
@@ -347,11 +350,17 @@ export async function fetchWaimai(
     signUpFlag: 2,
     highRebatesFlag: 0,
     noCommentFlag: 0,
-    takeawayPlatform: "",
-    userTypes: [1, 2, 3],
+    takeawayPlatform: "meituan",
+    userTypes: [1, 2, 3, 4],
     packageType: "",
     scrollPageData: null,
     threeKmFlag: "",
+    overbearFoodType: 1,
+    overbearFoodTypes: [1],
+    overbearListFlag: 1,
+    version: 3,
+    localCuisine: "",
+    brandIdentityFlag: null,
     tabType: "bwc",
   };
   let cursor: unknown = null;
@@ -375,13 +384,15 @@ export async function fetchWaimai(
           ? decrypt(text, responseKey(encryptedKey, privateKey))
           : text,
       );
-      checkStatus(data, 200);
+      checkStatus(data, [200, 0]);
       const offers = normalizeWaimai(data);
       cursor = data.data.scrollPageData ?? null;
+      if (data.data.hasMore === true && cursor === null)
+        throw new Error("Missing activity page cursor");
       return {
         offers,
         rowKeys: data.data.data.map((row: any) => String(row.id)),
-        hasMore: data.data.data.length > 0 && cursor !== null,
+        hasMore: data.data.data.length > 0 && cursor !== null && data.data.hasMore !== false,
       };
     } catch (error: any) {
       if (error.statusCode) throw error;

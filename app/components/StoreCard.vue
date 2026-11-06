@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Check, MapPin, Utensils } from "@lucide/vue";
 import type { StoreMatchGroup } from "#shared/types";
-import { providerNames, providerShortNames } from "#shared/types";
+import { providerNames } from "#shared/types";
 import { activeAt, estimatePrice, money, priceOutcome, ruleLabel, reviewBonusLabel, suggestedPaidCents } from "#shared/utils/pricing";
 import { todayEnrollmentWindow } from "#shared/utils/enrollment-time";
 const props = defineProps<{ group: StoreMatchGroup }>();
@@ -43,24 +43,24 @@ const imageFailed = ref(false);
           <span>{{ match.bawangcan.category }}</span
           ><span class="meta-divider"></span><MapPin :size="12" />{{ distance }}
         </div>
-        <span class="match-status"
-          ><Check :size="12" />{{
-            match.confidence === "id"
-              ? "已匹配"
-              : "分店待核验"
-          }}</span
-        >
+        <span v-if="match.confidence === 'id'" class="match-status"><Check :size="12" />已匹配</span>
       </div>
     </div>
     <div v-for="{ match, paid, outcome } in variants" :key="match.id" class="activity-variant">
       <div class="rebate-lines">
         <div>
-          <span class="provider-dot" :class="`${match.bawangcan.provider}-dot`"></span><span>{{ providerNames[match.bawangcan.provider] }}</span
-          ><strong>{{ ruleLabel(match.bawangcan.rule) }}</strong>
+          <span class="rebate-provider">
+            <span class="rebate-provider-name"><span class="provider-dot" :class="`${match.bawangcan.provider}-dot`"></span>{{ providerNames[match.bawangcan.provider] }}</span>
+            <span class="rebate-inventory">{{ match.bawangcan.inventory === undefined ? '名额待核验' : `剩 ${match.bawangcan.inventory} 份` }}</span>
+          </span>
+          <strong>{{ ruleLabel(match.bawangcan.rule) }}</strong>
         </div>
         <div>
-          <span class="provider-dot meituan-dot"></span><span>美团试吃官</span
-          ><strong>{{ ruleLabel(match.meituan.rule) }}</strong>
+          <span class="rebate-provider">
+            <span class="rebate-provider-name"><span class="provider-dot meituan-dot"></span>美团试吃官</span>
+            <span class="rebate-inventory">{{ match.meituan.inventory === undefined ? '名额待核验' : `剩 ${match.meituan.inventory} 份` }}</span>
+          </span>
+          <strong>{{ ruleLabel(match.meituan.rule) }}</strong>
         </div>
         <div v-if="match.meituan.reviewBonus">
           <span class="provider-dot meituan-dot"></span><span>美团评价</span>
@@ -74,16 +74,6 @@ const imageFailed = ref(false);
           match.meituan.requirement.startsWith("无需评价") && !match.meituan.reviewBonus
             ? "双方无需评价"
             : "含评价任务"
-        }}</span
-        ><span>{{
-          match.bawangcan.inventory === undefined
-            ? "名额待核验"
-            : `${providerShortNames[match.bawangcan.provider]}剩 ${match.bawangcan.inventory} 份`
-        }}</span
-        ><span>{{
-          match.meituan.inventory === undefined
-            ? "名额待核验"
-            : `美团剩 ${match.meituan.inventory} 份`
         }}</span>
       </div>
       <div class="card-bottom">

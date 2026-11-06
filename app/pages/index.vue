@@ -1,10 +1,8 @@
 <script setup lang="ts">
-import { ArrowDownToLine, ArrowRight, RefreshCw, Search, SlidersHorizontal } from "@lucide/vue";
+import { RefreshCw, Search, SlidersHorizontal } from "@lucide/vue";
 import type { StoreMatch } from "#shared/types";
-import { providerShortNames } from "#shared/types";
 import { groupStoreMatches, matchStores } from "#shared/utils/matching";
-import { estimatePrice, money, priceOutcome, suggestedPaidCents } from "#shared/utils/pricing";
-import { csvCell } from "#shared/utils/import";
+import { estimatePrice, suggestedPaidCents } from "#shared/utils/pricing";
 import { COMPARISON_RADIUS_METERS, matchWithinRadius } from "#shared/utils/scope";
 
 const { loaded, data, busy, enrollingOfferIds, syncing, filter, sort, bawangcanProvider, sync, changeCombination, cancelSchedule } = useFoodApp();
@@ -63,53 +61,6 @@ const sortOptions = [
   { value: "rebate", label: "返现降序" },
   { value: "distance", label: "距离升序" },
 ];
-function download(content: string, name: string, type: string) {
-  const url = URL.createObjectURL(new Blob([content], { type }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-function exportResults() {
-  const sourceLabels = { live: "同步", import: "导入" };
-  const rows = [
-    [
-      "店铺",
-      "分店状态",
-      "实付试算(元)",
-      `${providerShortNames[bawangcanProvider.value]}返现(元)`,
-      "美团返现(元)",
-      "收支试算(元)",
-      "收支结果",
-      "数据来源",
-      `${providerShortNames[bawangcanProvider.value]}采集时间`,
-      "美团采集时间",
-      "叠加状态",
-    ],
-  ];
-  for (const m of visibleGroups.value.flatMap(group => group.matches)) {
-    const p = preview(m);
-    rows.push([
-      m.bawangcan.name,
-      m.confidence === "id" ? "已匹配" : "待核验",
-      money(p.paidCents),
-      money(p.bawangcanCents),
-      money(p.meituanCents),
-      money(p.balanceCents),
-      priceOutcome(p.balanceCents).label,
-      `${sourceLabels[m.bawangcan.source]}/${sourceLabels[m.meituan.source]}`,
-      m.bawangcan.collectedAt,
-      m.meituan.collectedAt,
-      "待确认",
-    ]);
-  }
-  download(
-    "\ufeff" + rows.map((row) => row.map(csvCell).join(",")).join("\r\n"),
-    "叠个饭-同店试算.csv",
-    "text/csv;charset=utf-8",
-  );
-}
 </script>
 
 <template>
@@ -152,14 +103,7 @@ function exportResults() {
           7 公里内匹配活动<span>{{ visibleGroups.length }}</span>
         </h2>
         <div>
-          <span class="updated-at">{{ lastUpdated }}</span
-          ><button
-            class="text-button"
-            :disabled="!visibleGroups.length"
-            @click="exportResults"
-          >
-            <ArrowDownToLine :size="15" />导出结果
-          </button>
+          <span class="updated-at">{{ lastUpdated }}</span>
         </div>
       </div>
       <div class="filter-toolbar">
@@ -209,19 +153,6 @@ function exportResults() {
             matches.length ? "暂无筛选结果" : "暂无匹配活动"
           }}
         </h3>
-        <button
-          v-if="matches.length"
-          class="button secondary"
-          @click="filter = 'all'"
-        >
-          清除筛选</button
-        ><NuxtLink
-          v-else
-          class="button primary"
-          to="/accounts"
-        >
-          账号管理<ArrowRight :size="15" />
-        </NuxtLink>
       </div>
     </section>
   </div>
