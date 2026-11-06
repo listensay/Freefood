@@ -46,7 +46,6 @@ function createFoodApp() {
   let refreshingSchedules = false;
   let mounted = false;
   let dataRevision = 0;
-  let pendingCombinationSync = false;
   const refreshingProfiles = new Set<BawangcanProvider>();
   watch(() => route.path, () => {
     filter.value = "all";
@@ -102,7 +101,6 @@ function createFoodApp() {
       showError(error);
     } finally {
       actionBusy.value = "";
-      if (pendingCombinationSync) void sync(true);
     }
   }
   const post = <T,>(url: string, body?: Record<string, unknown>) =>
@@ -166,7 +164,6 @@ function createFoodApp() {
       return;
     }
     syncing.value = true;
-    pendingCombinationSync = false;
     const provider = bawangcanProvider.value;
     const revision = dataRevision;
     let polling = false, pollActive = true;
@@ -200,7 +197,6 @@ function createFoodApp() {
       pollActive = false;
       clearInterval(pollTimer);
       syncing.value = false;
-      if (mounted && (pendingCombinationSync || provider !== bawangcanProvider.value)) void sync(true);
     }
   }
   async function connectComputerWeChat(provider: BawangcanProvider) {
@@ -260,7 +256,6 @@ function createFoodApp() {
     } finally {
       enrollingOfferIds.value.delete(offerId);
       delete enrollmentActions.value[offerId];
-      if (pendingCombinationSync) void sync(true);
     }
   }
   async function enrollXiaochan(offer: Offer) {
@@ -325,8 +320,6 @@ function createFoodApp() {
       localStorage.setItem("food-bawangcan-provider", provider);
     } catch {}
     filter.value = "all";
-    pendingCombinationSync = true;
-    if (mounted && loaded.value) void sync(true);
   }
   function openLocation() {
     locationError.value = "";

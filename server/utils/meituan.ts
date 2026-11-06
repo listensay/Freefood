@@ -6,6 +6,7 @@ import type {
   BrowserContextOptions,
   Page,
   Frame,
+  Request,
 } from "playwright-core";
 import { createError } from "h3";
 import type {
@@ -44,6 +45,7 @@ interface BrowserSession {
   error?: string;
   userError?: string;
   captureAfter: number;
+  captureGeneration: number;
   remote?: { token: string; expiresAt: number; verifying: boolean };
   tasks: Promise<unknown>;
   pendingTasks: number;
@@ -328,6 +330,8 @@ async function openBrowser(
         channel: process.env.FOOD_BROWSER_PATH ? undefined : "chrome",
         executablePath: process.env.FOOD_BROWSER_PATH || undefined,
         headless: !headed,
+        // The H5 gateway rejects automation-marked sessions even with valid cookies.
+        args: ["--disable-blink-features=AutomationControlled"],
       });
     } catch {
       throw createError({
@@ -340,6 +344,8 @@ async function openBrowser(
         throw createError({ statusCode: 410, statusMessage: "登录窗口已关闭" });
       const context = await browser.newContext({
         viewport: { width: 480, height: 850 },
+        // Keep login verification and synchronization on the same mobile H5 client.
+        userAgent: `Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${browser.version()} Mobile Safari/537.36`,
         permissions: ["geolocation"],
         storageState:
           local.meituanStorage as BrowserContextOptions["storageState"],
@@ -360,12 +366,17 @@ async function openBrowser(
         phone: "",
         userChecked: false,
         captureAfter: Date.now(),
+        captureGeneration: 0,
         tasks: Promise.resolve(),
         pendingTasks: 0,
         pointerDown: false,
         passportSessionEstablished: false,
       };
       browsers.set(id, state);
+      const requestGenerations = new WeakMap<Request, number>();
+      context.on("request", request => {
+        requestGenerations.set(request, state.captureGeneration);
+      });
       await context.route("**/*", async (route) => {
         const request = route.request();
         if (
@@ -442,8 +453,8 @@ async function openBrowser(
           ].includes(url.pathname)
         )
           return;
-        const generation = state.captureAfter;
-        if (response.request().timing().startTime < generation) return;
+        const generation = requestGenerations.get(response.request());
+        if (generation !== state.captureGeneration || response.request().timing().startTime < state.captureAfter) return;
         let offerRequest: Record<string, any> | undefined;
         if (url.pathname === "/act/ge/queryPoiByRecallBiz") {
           try {
@@ -469,7 +480,7 @@ async function openBrowser(
             return;
           }
           const data = await response.json();
-          if (generation !== state.captureAfter) return;
+          if (generation !== state.captureGeneration) return;
           if (!response.ok() || Number(data.ret) !== 0) {
             if (url.pathname === "/act/ge/getUserInfo")
               state.userError = "美团身份接口拒绝访问，请完成官方安全验证";
@@ -487,13 +498,14 @@ async function openBrowser(
           if (url.pathname === "/act/ge/getUserInfo") {
             state.phone = String(data.data?.phone || "");
             state.userChecked = true;
+            state.userError = undefined;
           } else {
             const request = offerRequest!;
             const offers = normalizeMeituan(data);
             const pageNo = request.pageNo ?? 1;
             if (!Number.isInteger(pageNo) || pageNo < 1) return;
             const requestHeaders = await response.request().allHeaders();
-            if (generation !== state.captureAfter) return;
+            if (generation !== state.captureGeneration) return;
             state.offerRequest = {
               frame: response.request().frame(),
               body: request,
@@ -509,7 +521,7 @@ async function openBrowser(
             state.error = undefined;
           }
         })().catch((error: any) => {
-          if (generation !== state.captureAfter) return;
+          if (generation !== state.captureGeneration) return;
           if (url.pathname === "/act/ge/getUserInfo")
             state.userError = "无法解析美团身份响应，请重新打开试吃官页面";
           else
@@ -700,6 +712,7 @@ export async function verifyMeituanLogin(id: string, token?: string) {
       state.userError = undefined;
       state.pageError = undefined;
       state.captureAfter = Date.now();
+      state.captureGeneration++;
       state.capturedAt = undefined;
       try {
         await currentPage(state).goto(MEITUAN_URL, {
@@ -782,9 +795,12 @@ export async function fetchMeituan(
   location: LocationSettings,
   scope?: SyncScope,
 ): Promise<Offer[]> {
-  const state = await openBrowser(id, false);
+  // Open a blank context first; the sync navigation below is the only page load.
+  const state = await openBrowser(id, false, "about:blank");
   return browserTask(state, async () => {
     state.lastUsed = Date.now();
+    await applyLocation(state.context, location);
+    state.phone = "";
     state.userChecked = false;
     state.capturedAt = undefined;
     state.offerPages.clear();
@@ -794,9 +810,10 @@ export async function fetchMeituan(
     state.userError = undefined;
     state.pageError = undefined;
     state.captureAfter = Date.now();
-    await applyLocation(state.context, location);
+    state.captureGeneration++;
     await currentPage(state).goto(MEITUAN_URL, {
-      waitUntil: "domcontentloaded",
+      // Official responses below determine readiness, not unrelated page assets.
+      waitUntil: "commit",
       timeout: 30_000,
     });
     await waitForOfficialData(state);

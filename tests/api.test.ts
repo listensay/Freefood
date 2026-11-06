@@ -509,13 +509,14 @@ try {
     const result = await pending;
     assert.equal(result.data.offers.waimai.length, 1);
   });
-  await test("Combination switches sync Waimai immediately and wait for an in-flight Xiaochan sync", async () => {
+  await test("Combination tabs only switch cached results, without starting or queuing syncs; manual and timed sync use the selected tab", async () => {
     const { chromium } = await import("playwright-core");
     const browser = await chromium.launch({ channel: "chrome", headless: true });
     try {
       for (const inFlight of [false, true]) {
         const context = await browser.newContext();
         const page = await context.newPage();
+        await page.clock.install();
         const collectedAt = new Date().toISOString();
         const activity = { category: "美食", inventory: 3, distanceMeters: 1000, requirement: "无需评价",
           source: "live", collectedAt, rule: { kind: "fixed", thresholdCents: 2000, cashbackCents: 1500 } };
@@ -527,12 +528,11 @@ try {
             waimai: { state: "connected", label: "已登录", profile: { userId: "2" } },
             meituan: { state: "disconnected", label: "未连接" },
           },
-          offers: { xiaochan: [], waimai: [], meituan: [{ ...waimai, provider: "meituan", id: "meituan:1" }] },
+          offers: { xiaochan: [], waimai: [waimai], meituan: [{ ...waimai, provider: "meituan", id: "meituan:1" }] },
           updatedAt: {}, enrollmentSchedules: [],
         };
         const requested: string[] = [];
         let completeFirst: (() => Promise<void>) | undefined;
-        let completeWaimai: (() => Promise<void>) | undefined;
         await page.route("**/api/**", async route => {
           if (route.request().url().endsWith("/api/sync")) {
             const { provider } = route.request().postDataJSON();
@@ -540,13 +540,6 @@ try {
             if (inFlight && requested.length === 1) {
               completeFirst = () => route.fulfill({ json: { data: dashboard, errors: [], message: "同步完成" } });
               return;
-            }
-            if (provider === "waimai") {
-              dashboard.offers.waimai = [waimai];
-              if (!inFlight) {
-                completeWaimai = () => route.fulfill({ json: { data: dashboard, errors: [], message: "同步完成" } });
-                return;
-              }
             }
             await route.fulfill({ json: { data: dashboard, errors: [], message: "同步完成" } });
           } else await route.fulfill({ json: dashboard });
@@ -556,19 +549,33 @@ try {
         await firstRequest;
         if (!inFlight) await page.waitForFunction(() => !document.querySelector(".sync-button")?.textContent?.includes("正在同步"));
         await page.getByRole("button", { name: "歪麦", exact: true }).click();
+        await page.locator(".store-card").waitFor();
+        await page.clock.runFor(100);
+        assert.deepEqual(requested, ["xiaochan"]);
+        assert.equal(await page.evaluate(() => localStorage.getItem("food-bawangcan-provider")), "waimai");
+        assert.equal(await page.getByRole("button", { name: "歪麦", exact: true }).getAttribute("aria-pressed"), "true");
         if (inFlight) {
-          assert.deepEqual(requested, ["xiaochan"]);
+          assert.match(await page.locator(".sync-button").innerText(), /正在同步/);
           await completeFirst!();
         }
-        await page.locator(".store-card").waitFor();
-        if (!inFlight) {
-          assert.match(await page.locator(".sync-button").innerText(), /正在同步/);
-          await completeWaimai!();
-        }
-        assert.deepEqual(requested, ["xiaochan", "waimai"]);
+        await page.waitForFunction(() => !document.querySelector(".sync-button")?.textContent?.includes("正在同步"));
+        await page.getByRole("button", { name: "歪麦", exact: true }).click();
+        await page.getByRole("button", { name: "小蚕", exact: true }).click();
+        await page.getByRole("button", { name: "歪麦", exact: true }).click();
+        await page.clock.runFor(100);
+        assert.deepEqual(requested, ["xiaochan"]);
         assert.equal(await page.locator(".store-card h3").innerText(), waimai.name);
         assert.equal(await page.locator(".store-card .match-status").count(), 0);
         assert.doesNotMatch(await page.locator(".store-card").innerText(), /分店待核验/);
+        const manualSync = page.waitForResponse(response => response.url().endsWith("/api/sync"));
+        await page.getByRole("button", { name: "同步活动", exact: true }).click();
+        await manualSync;
+        await page.waitForFunction(() => !document.querySelector(".sync-button")?.textContent?.includes("正在同步"));
+        assert.deepEqual(requested, ["xiaochan", "waimai"]);
+        const timedSync = page.waitForResponse(response => response.url().endsWith("/api/sync"));
+        await page.clock.fastForward(5 * 60_000);
+        await timedSync;
+        assert.deepEqual(requested, ["xiaochan", "waimai", "waimai"]);
         await context.close();
       }
     } finally { await browser.close(); }

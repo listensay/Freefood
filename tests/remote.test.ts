@@ -306,6 +306,37 @@ try {
     const owner = await (await call("/api/dashboard", cookie)).json();
     assert.equal(owner.connections.meituan.state, "connected");
   });
+  await test("Chrome activity-only sessions require official identity verification and preserve saved data on refusal", async () => {
+    const imported = (await fetch(base + "/api/dashboard")).headers.get("set-cookie")!.split(";")[0]!;
+    const activityLogin = (phone: string, value: string, profile = "Default") => writeChromeProfile(chromeDirectory, [
+      { name: "remote-test-phone", value: phone },
+      { name: "wm_ado_ge_x", value },
+      { name: "wm_ado_ge_e_k", value: "private-activity-key-canary" },
+    ], profile);
+    await activityLogin("13800000000", "private-activity-canary");
+    const response = await call("/api/connections/meituan/browser", imported, undefined, {});
+    assert.equal(response.status, 200, await response.clone().text());
+    const text = await response.text(), result = JSON.parse(text);
+    assert.equal(result.connections.meituan.state, "connected");
+    assert.equal(result.connections.meituan.label, "138****0000");
+    assert.ok(!text.includes("private-activity"));
+    for (const name of (await readdir(directory)).filter(name => name.endsWith(".enc")))
+      assert.ok(!(await readFile(join(directory, name))).includes(Buffer.from("private-activity")));
+    await call("/api/import", imported, undefined, { provider: "meituan", offers: [{ id: "keep-activity", name: "已保存门店", rule: { kind: "fixed", thresholdCents: 2500, cashbackCents: 500 } }] });
+    const reconnected = await call("/api/connections/meituan/browser", imported, undefined, {});
+    assert.equal(reconnected.status, 200);
+    assert.equal((await reconnected.json()).offers.meituan[0].id, "meituan:keep-activity");
+    await activityLogin("13800000000", "private-invalid-activity-canary");
+    const failed = await call("/api/connections/meituan/browser", imported, undefined, {});
+    assert.equal(failed.status, 401, await failed.clone().text());
+    const saved = await (await call("/api/dashboard", imported)).json();
+    assert.equal(saved.connections.meituan.state, "connected");
+    assert.equal(saved.offers.meituan[0].id, "meituan:keep-activity");
+    await activityLogin("13800000000", "private-activity-canary");
+    await activityLogin("13700000000", "private-activity-second-canary", "Profile 1");
+    assert.equal((await call("/api/connections/meituan/browser", imported, undefined, {})).status, 409);
+    await rm(join(chromeDirectory, "Profile 1"), { recursive: true, force: true });
+  });
   await test("Meituan radius sync signs each page with the official SDK, keeps earlier pages and reads capped review bonuses", async () => {
     await fetch(base + "/api/connections/meituan", { method: "DELETE", headers: { cookie, "x-food-request": "1" } });
     const imported = (await fetch(base + "/api/dashboard")).headers.get("set-cookie")!.split(";")[0]!;

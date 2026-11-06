@@ -7,7 +7,7 @@ const main = `<!doctype html><meta charset="utf-8"><title>美团远程登录测�
 <script>document.querySelector('#open').onclick=()=>document.querySelector('#login').style.display='block';
 if(location.hostname==='offsiteact.meituan.com'){
 window.H5guard={sign:async({url,method,data,headers})=>{if(url!=='/act/ge/queryPoiByRecallBiz'||method!=='POST'||'riskParams' in data||headers.mtgsig)throw new Error('Invalid signing request');return{headers:{mtgsig:'test-page-'+data.pageNo}}}};
-fetch('/act/ge/getUserInfo');fetch('/act/ge/getPageModuleInfo');fetch('/act/ge/queryPoiByRecallBiz',{method:'POST',headers:{'Content-Type':'application/json',mtgsig:'test-page-1'},body:JSON.stringify({recallBizId:'cpsSelfPromotionOrder',pageNo:1,riskParams:{}})});}</script>`;
+fetch('/act/ge/getUserInfo',{method:'POST',headers:{'x-test-webdriver':String(navigator.webdriver)}});fetch('/act/ge/getPageModuleInfo');fetch('/act/ge/queryPoiByRecallBiz',{method:'POST',headers:{'Content-Type':'application/json',mtgsig:'test-page-1'},body:JSON.stringify({recallBizId:'cpsSelfPromotionOrder',pageNo:1,riskParams:{}})});}</script>`;
 const login = `<!doctype html><meta charset="utf-8"><style>body{margin:0;font:16px sans-serif;background:#fff}label{position:absolute;left:24px}input{position:absolute;left:24px;width:400px;height:36px;font-size:16px}button{position:absolute;left:24px;top:180px;width:400px;height:40px}#drag{position:absolute;left:24px;top:240px;width:40px;height:40px;background:#ce5038}#result{position:absolute;left:24px;top:300px}</style>
 <label style="top:18px">测试手机号</label><input id="phone" style="top:45px"><button id="send" style="left:300px;top:45px;width:120px">获取验证码</button><label style="top:84px">测试验证码</label><input id="code" style="top:110px"><button id="submit">登录</button><div id="drag"></div><span id="result">拖动测试</span>
 <script>let held=false;let start=0;document.querySelector('#drag').onmousedown=e=>{held=true;start=e.clientX};document.onmousemove=e=>{if(held)document.querySelector('#drag').style.left=Math.max(24,e.clientX-20)+'px'};document.onmouseup=e=>{if(held&&e.clientX-start>80)document.querySelector('#result').textContent='拖动完成';held=false};
@@ -79,8 +79,20 @@ chromium.launch = async (options) => {
         });
       }
       if (url.pathname === "/act/ge/getUserInfo") {
+        const headers = await route.request().allHeaders();
+        if (headers["x-test-webdriver"] !== "false" ||
+          !/Android.*Chrome\/[\d.]+ Mobile/.test(headers["user-agent"] || ""))
+          return route.fulfill({ status: 403, body: "private-unsupported-browser-canary" });
+        const cookies = await context.cookies();
+        const activitySession = cookies.find(cookie => cookie.name === "wm_ado_ge_x");
+        if (activitySession) {
+          assert.equal(cookies.some(cookie => cookie.name === "token"), false);
+          assert.equal(cookies.find(cookie => cookie.name === "wm_ado_ge_e_k")?.value, "private-activity-key-canary");
+          if (activitySession.value === "private-invalid-activity-canary")
+            return route.fulfill({ json: { ret: 0, data: { phone: "" } } });
+        }
         const phone =
-          (await context.cookies()).find(
+          cookies.find(
             (cookie) => cookie.name === "remote-test-phone",
           )?.value || "";
         if (phone === "13900000000")

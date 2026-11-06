@@ -10,6 +10,15 @@ import type { BrowserContextOptions } from "playwright-core";
 export type MeituanBrowserStorage = Exclude<BrowserContextOptions["storageState"], string | undefined>;
 const domains = [".meituan.com", "meituan.com", "offsiteact.meituan.com", ".offsiteact.meituan.com"];
 const execute = promisify(execFile);
+const activitySessionCookies = ["wm_ado_ge_x", "wm_ado_ge_e_k"];
+
+function loginCookies<T extends { name: string }>(cookies: T[]): T[] {
+  // The activity page can use its own session pair without a passport token.
+  // These are candidates only; the official identity endpoint still verifies them.
+  const credentials = cookies.filter(cookie => cookie.name === "token" || activitySessionCookies.includes(cookie.name));
+  return credentials.some(cookie => cookie.name === "token") ||
+    activitySessionCookies.every(name => credentials.some(cookie => cookie.name === name)) ? credentials : [];
+}
 
 interface ChromeCookie {
   host_key: string;
@@ -110,7 +119,7 @@ export async function readChromeMeituanLogins(options: {
       const now = (options.now ?? Date.now()) / 1000;
       const current = rows.filter(row => !row.is_persistent || row.expires_utc / 1_000_000 - 11644473600 > now);
       if (current.length > 200) throw cookieError();
-      if (current.some(row => row.name === "token" && (row.value || row.encrypted_value.length)))
+      if (loginCookies(current.filter(row => row.value || row.encrypted_value.length)).length)
         candidates.push({ rows: current, version });
     } catch (error: any) {
       if (error.code !== "ENOENT") failure = error;
@@ -137,9 +146,9 @@ export async function readChromeMeituanLogins(options: {
       })).filter(cookie => cookie.value && cookie.path.startsWith("/") &&
         /^[!#$%&'*+\-.^_`|~A-Za-z0-9]{1,200}$/.test(cookie.name) &&
         cookie.value.length <= 16_000 && !/[\u0000-\u001f\u007f]/.test(cookie.value));
-      const tokens = cookies.filter(cookie => cookie.name === "token");
-      if (!tokens.length) return [];
-      const identity = JSON.stringify(tokens.map(cookie => [cookie.domain, cookie.path, cookie.value]).sort());
+      const credentials = loginCookies(cookies);
+      if (!credentials.length) return [];
+      const identity = JSON.stringify(credentials.map(cookie => [cookie.name, cookie.domain, cookie.path, cookie.value]).sort());
       if (seen.has(identity)) return [];
       seen.add(identity);
       return [{ cookies, origins: [] }];
