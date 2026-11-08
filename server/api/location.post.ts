@@ -1,3 +1,4 @@
+import { defineEventHandler, readBody, createError } from "h3";
 import {
   loadSession,
   saveSession,
@@ -5,6 +6,8 @@ import {
   withSessionLock,
   publicSession,
 } from "../utils/session";
+import { armXiaochanSchedules } from "../utils/xiaochan-schedules";
+import { armWaimaiSchedules } from "../utils/waimai-schedules";
 
 export default defineEventHandler(async (event) => {
   const id = sessionId(event),
@@ -32,7 +35,7 @@ export default defineEventHandler(async (event) => {
       statusMessage: "请填写地址名称、六位城市代码和有效经纬度",
     });
   return withSessionLock(id, async () => {
-    const session = await loadSession(id);
+    const session = structuredClone(await loadSession(id));
     const firstAutomaticLocation = body.automatic === true && !session.location;
     session.location = {
       label: body.label.trim(),
@@ -43,10 +46,13 @@ export default defineEventHandler(async (event) => {
     };
     if (!firstAutomaticLocation) {
       delete session.xiaochanSchedules;
+      delete session.waimaiSchedules;
       session.offers = { xiaochan: [], waimai: [], meituan: [] };
       session.updatedAt = {};
     }
     await saveSession(id, session);
+    armXiaochanSchedules(id, session);
+    armWaimaiSchedules(id, session);
     return publicSession(session);
   });
 });

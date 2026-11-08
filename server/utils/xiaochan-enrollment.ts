@@ -1,5 +1,6 @@
 import { createError } from "h3";
 import { activeAt } from "../../shared/utils/pricing";
+import { xiaochanAdvanceWindow } from "../../shared/utils/xiaochan-advance-time";
 import { COMPARISON_RADIUS_METERS, offerWithinRadius } from "../../shared/utils/scope";
 import type { LocalSession } from "./session";
 import { xiaochanAccountHeaders, xiaochanRpc } from "./xiaochan-rpc";
@@ -9,6 +10,12 @@ interface EnrollmentOptions {
   persist: () => Promise<void>;
   rpc?: typeof xiaochanRpc;
   now?: Date;
+  // Internal scheduler only: the caller must hold the account lock and verify activity and coupon capacity.
+  advanceOrder?: boolean;
+  // While holding that lock, recheck current time and capacity after pending persistence; return whether submission is still early.
+  beforeSubmit?: () => boolean;
+  // Internal verified activity data for this attempt; never replace the saved offer used for pricing.
+  offerSnapshot?: Offer;
 }
 
 const confirmedOrderStates = new Set(["0", "1", "2", "3", "6", "8", "9", "12", "13", "14", "15"]);
@@ -105,7 +112,7 @@ export function applyXiaochanEnrollmentUpdates(
 export async function enrollXiaochan(
   session: LocalSession,
   input: unknown,
-  { persist, rpc = xiaochanRpc, now = new Date() }: EnrollmentOptions,
+  { persist, rpc = xiaochanRpc, now = new Date(), advanceOrder = false, beforeSubmit, offerSnapshot }: EnrollmentOptions,
 ) {
   const account = session.xiaochanAccount;
   if (!account || session.connections.xiaochan.state !== "connected")
@@ -119,7 +126,7 @@ export async function enrollXiaochan(
   const promotionId = positiveId(input.slice("xiaochan:".length));
   if (!promotionId)
     throw createError({ statusCode: 400, statusMessage: "请选择小蚕活动" });
-  const offer = session.offers.xiaochan.find(row => row.id === input);
+  const offer = offerSnapshot?.id === input ? offerSnapshot : session.offers.xiaochan.find(row => row.id === input);
   if (!offer || offer.provider !== "xiaochan" || offer.source !== "live")
     throw createError({ statusCode: 404, statusMessage: "活动已更新，请重新同步" });
   const previous = session.xiaochanEnrollments?.[input];
@@ -154,7 +161,9 @@ export async function enrollXiaochan(
       positiveId(detail.promotion_detail?.promotion_id) !== promotionId ||
       ![1, "1"].includes(detail.promotion_detail?.meituan_status) || !orderId)
       throw createError({ statusCode: 409, statusMessage: "报名待确认" });
-    const enrolled = { state: "enrolled" as const, orderId, updatedAt: now.toISOString() };
+    const enrolled = { state: "enrolled" as const, orderId, updatedAt: now.toISOString(),
+      ...(previous.advanceOrder ? { advanceOrder: true } : {}),
+    };
     session.xiaochanEnrollments![input] = enrolled;
     await persist();
     return enrolled;
@@ -162,12 +171,18 @@ export async function enrollXiaochan(
   const location = session.location;
   if (!location)
     throw createError({ statusCode: 400, statusMessage: "请先设置收餐地址" });
-  if (!activeAt(offer, now) || !Number.isSafeInteger(offer.inventory) || (offer.inventory ?? 0) <= 0 ||
+  const advanceWindow = advanceOrder ? xiaochanAdvanceWindow(offer, new Date(now.getTime() - 1)) : undefined;
+  const available = advanceOrder
+    ? !!advanceWindow && now.getTime() >= advanceWindow.start && now.getTime() < advanceWindow.end
+    : activeAt(offer, now);
+  if (!available || !Number.isSafeInteger(offer.inventory) || (offer.inventory ?? 0) <= 0 ||
     !offerWithinRadius(offer, COMPARISON_RADIUS_METERS))
     throw createError({ statusCode: 409, statusMessage: "活动暂不可报名" });
 
   const enrollments = session.xiaochanEnrollments ||= {};
-  const pending = { state: "unknown" as const, updatedAt: now.toISOString() };
+  const pending = { state: "unknown" as const, updatedAt: now.toISOString(),
+    ...(advanceOrder ? { advanceOrder: true } : {}),
+  };
   enrollments[input] = pending;
   // Persist the attempt before requesting quota so an interrupted request cannot be resubmitted.
   try {
@@ -175,6 +190,27 @@ export async function enrollXiaochan(
   } catch (error) {
     delete enrollments[input];
     throw error;
+  }
+  if (beforeSubmit) {
+    try {
+      const verifiedAdvanceOrder = beforeSubmit();
+      if (typeof verifiedAdvanceOrder !== "boolean")
+        throw createError({ statusCode: 409, statusMessage: "活动暂不可报名" });
+      if (verifiedAdvanceOrder !== advanceOrder) {
+        advanceOrder = verifiedAdvanceOrder;
+        if (advanceOrder) pending.advanceOrder = true;
+        else delete pending.advanceOrder;
+        await persist();
+        // A second slow write must not authorize a request with a stale or unpersisted flag.
+        if (beforeSubmit() !== advanceOrder)
+          throw createError({ statusCode: 409, statusMessage: "活动暂不可报名" });
+      }
+    } catch (error) {
+      // No quota request has started, so this local pending attempt can be removed.
+      delete enrollments[input];
+      await persist();
+      throw error;
+    }
   }
   let result: any;
   try {
@@ -187,7 +223,7 @@ export async function enrollXiaochan(
         silk_id: Number(account.silkId),
         promotion_id: Number(promotionId),
         store_platform: 1,
-        if_advance_order: false,
+        if_advance_order: advanceOrder,
         if_pre_order: false,
         city_code: location.cityCode,
         longitude: location.longitude,
@@ -207,7 +243,9 @@ export async function enrollXiaochan(
   const orderId = positiveId(result?.promotion_order_id);
   if (!result?.status || ![0, "0"].includes(result.status.code) || !orderId)
     throw createError({ statusCode: 502, statusMessage: "报名待确认" });
-  const enrolled = { state: "enrolled" as const, orderId, updatedAt: new Date().toISOString() };
+  const enrolled = { state: "enrolled" as const, orderId, updatedAt: new Date().toISOString(),
+    ...(advanceOrder ? { advanceOrder: true } : {}),
+  };
   enrollments[input] = enrolled;
   await persist();
   return enrolled;

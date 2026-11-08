@@ -5,6 +5,7 @@
   --color-primary-disabled: #ffd1da;
   --color-primary-error-text: #c13515;
   --color-primary-error-text-hover: #b32505;
+  --color-luxe: #460479;
   --color-ink: #222222;
   --color-body: #3f3f3f;
   --color-muted: #6a6a6a;
@@ -282,6 +283,22 @@ code {
   max-width: 1296px;
   padding: var(--spacing-xl) var(--spacing-xxl) var(--spacing-section);
   margin: auto;
+}
+.page-enter-active {
+  transition:
+    opacity 180ms ease-out,
+    transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.page-leave-active {
+  transition: opacity 100ms ease-in;
+  pointer-events: none;
+}
+.page-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+.page-leave-to {
+  opacity: 0;
 }
 .page-heading {
   display: flex;
@@ -844,6 +861,16 @@ code {
   min-height: 36px;
   padding-block: 8px;
 }
+.schedule-enrollment-button:not(:disabled) {
+  background: color-mix(in srgb, var(--color-luxe) 6%, var(--color-canvas));
+  border-color: color-mix(in srgb, var(--color-luxe) 24%, var(--color-canvas));
+  color: var(--color-luxe);
+}
+.schedule-enrollment-button:hover:not(:disabled),
+.schedule-enrollment-button:active:not(:disabled) {
+  background: color-mix(in srgb, var(--color-luxe) 10%, var(--color-canvas));
+  border-color: color-mix(in srgb, var(--color-luxe) 40%, var(--color-canvas));
+}
 .enrollment-actions {
   display: flex;
   align-items: center;
@@ -881,6 +908,31 @@ code {
 }
 .schedule-activity-name {
   margin: 0 0 16px;
+}
+.location-dialog.schedule-dialog .schedule-coupon-option {
+  display: flex;
+  flex-direction: row-reverse;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 16px;
+  padding: 8px 12px;
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-sm);
+}
+.schedule-dialog .schedule-coupon-option input {
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+.schedule-coupon-text {
+  display: grid;
+  gap: 2px;
+}
+.schedule-coupon-time {
+  color: var(--color-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 .schedule-time-heading {
   display: flex;
@@ -994,8 +1046,9 @@ code {
 .account-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-rows: 1fr;
   gap: var(--spacing-lg);
-  align-items: start;
+  align-items: stretch;
 }
 .account-panel {
   background: var(--color-canvas);
@@ -1491,6 +1544,11 @@ dialog[open] {
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .page-enter-from,
+  .page-leave-to {
+    opacity: 1;
+    transform: none;
+  }
   *,
   *::before,
   *::after {

@@ -1,4 +1,8 @@
 import { createError } from "h3";
+import type { Offer } from "../../shared/types";
+import { xiaochanAdvanceWindow } from "../../shared/utils/xiaochan-advance-time";
+import { loadXiaochanAdvanceContext, xiaochanAdvanceAccountId } from "./xiaochan-advance";
+import { assertAdvanceCouponCapacity, withXiaochanAdvanceLock } from "./xiaochan-advance-lock";
 import { canScheduleEnrollment } from "../../shared/utils/enrollment-time";
 import { COMPARISON_RADIUS_METERS, offerWithinRadius } from "../../shared/utils/scope";
 import { enrollXiaochan } from "./xiaochan-enrollment";
@@ -8,11 +12,11 @@ import { loadSession, saveSession, storedSessionIds, withSessionLock, type Local
 const timers = new Map<string, { runAt: string; timer: ReturnType<typeof setTimeout> }>();
 const accountId = (session: LocalSession) => `${session.xiaochanAccount?.silkId}:${session.xiaochanAccount?.userId}`;
 
-export function setXiaochanSchedule(session: LocalSession, input: unknown, time: unknown, now = new Date()) {
+function scheduleInput(session: LocalSession, input: unknown, time: unknown) {
   if (!session.xiaochanAccount || session.connections.xiaochan.state !== "connected")
     throw createError({ statusCode: 401, statusMessage: "请先登录小蚕" });
   xiaochanAccountHeaders(session.xiaochanAccount);
-  if (typeof input !== "string" || !/^xiaochan:[1-9]\d*$/.test(input))
+  if (typeof input !== "string" || !/^xiaochan:[1-9]\d*$/.test(input) || !Number.isSafeInteger(Number(input.slice(9))))
     throw createError({ statusCode: 400, statusMessage: "请选择小蚕活动" });
   if (typeof time !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?(?:Z|\+08:00)$/.test(time))
     throw createError({ statusCode: 400, statusMessage: "请选择有效的报名时间" });
@@ -24,19 +28,62 @@ export function setXiaochanSchedule(session: LocalSession, input: unknown, time:
   if (session.xiaochanEnrollments?.[input] || session.xiaochanSchedules?.[input]?.state === "running")
     throw createError({ statusCode: 409, statusMessage: "活动已有报名，请先确认状态" });
   const runAt = new Date(time);
-  if (!canScheduleEnrollment(offer, runAt, now) || !offerWithinRadius(offer, COMPARISON_RADIUS_METERS))
+  if (!Number.isFinite(runAt.getTime()) || !offerWithinRadius(offer, COMPARISON_RADIUS_METERS))
     throw createError({ statusCode: 400, statusMessage: "请选择今天的活动有效时间" });
+  return { offer, runAt };
+}
+
+function storeSchedule(session: LocalSession, offer: Offer, runAt: Date, advanceOrder = false) {
   const { enrollment: _enrollment, enrollmentSchedule: _schedule, ...activity } = offer;
   const schedule = {
-    offerId: input, name: offer.name, runAt: runAt.toISOString(), state: "scheduled" as const,
-    offer: structuredClone(activity), location: structuredClone(session.location), accountId: accountId(session),
+    offerId: offer.id, name: offer.name, runAt: runAt.toISOString(), state: "scheduled" as const,
+    offer: structuredClone(activity), location: structuredClone(session.location!), accountId: accountId(session),
+    ...(advanceOrder ? { advanceOrder: true } : {}),
   };
-  (session.xiaochanSchedules ||= {})[input] = schedule;
+  (session.xiaochanSchedules ||= {})[offer.id] = schedule;
   return schedule;
 }
 
+export function setXiaochanSchedule(session: LocalSession, input: unknown, time: unknown, now = new Date()) {
+  const { offer, runAt } = scheduleInput(session, input, time);
+  if (!canScheduleEnrollment(offer, runAt, now))
+    throw createError({ statusCode: 400, statusMessage: "请选择今天的活动有效时间" });
+  return storeSchedule(session, offer, runAt);
+}
+
+export async function createXiaochanSchedule(
+  session: LocalSession, input: unknown, time: unknown,
+  { persist, rpc, now }: { persist: () => Promise<void>; rpc?: typeof xiaochanRpc; now?: Date },
+) {
+  const { offer, runAt } = scheduleInput(session, input, time);
+  const save = async (verifiedOffer: Offer, advanceOrder = false) => {
+    const previous = session.xiaochanSchedules?.[offer.id];
+    const schedule = storeSchedule(session, verifiedOffer, runAt, advanceOrder);
+    try { await persist(); } catch (error) {
+      if (previous) session.xiaochanSchedules![offer.id] = previous;
+      else delete session.xiaochanSchedules?.[offer.id];
+      throw error;
+    }
+    return schedule;
+  };
+  return withXiaochanAdvanceLock(xiaochanAdvanceAccountId(session), async () => {
+    const current = now ?? new Date();
+    if (canScheduleEnrollment(offer, runAt, current)) return save(offer);
+    const potential = xiaochanAdvanceWindow(offer, current);
+    if (!potential || runAt.getTime() < potential.start || runAt.getTime() >= potential.end)
+      throw createError({ statusCode: 400, statusMessage: "请选择今天的活动有效时间" });
+    const context = await loadXiaochanAdvanceContext(session, input, { rpc, now: now ?? new Date() });
+    const checkedAt = now ?? new Date();
+    const window = xiaochanAdvanceWindow(context.offer, checkedAt);
+    if (!window || runAt.getTime() < window.start || runAt.getTime() >= window.end)
+      throw createError({ statusCode: 400, statusMessage: "请选择今天的活动有效时间" });
+    assertAdvanceCouponCapacity(context.coupons, [...context.reservations, { offerId: offer.id, runAt: runAt.toISOString() }]);
+    return save(context.offer, true);
+  });
+}
+
 export function cancelXiaochanSchedule(session: LocalSession, input: unknown) {
-  if (typeof input !== "string" || !/^xiaochan:[1-9]\d*$/.test(input))
+  if (typeof input !== "string" || !/^xiaochan:[1-9]\d*$/.test(input) || !Number.isSafeInteger(Number(input.slice(9))))
     throw createError({ statusCode: 400, statusMessage: "请选择小蚕活动" });
   if (session.xiaochanSchedules?.[input]?.state === "running")
     throw createError({ statusCode: 409, statusMessage: "报名正在执行" });
@@ -48,8 +95,9 @@ export function cancelXiaochanSchedule(session: LocalSession, input: unknown) {
 export async function runXiaochanSchedule(
   session: LocalSession,
   offerId: string,
-  { persist, rpc, now = new Date() }: { persist: () => Promise<void>; rpc?: typeof xiaochanRpc; now?: Date },
+  { persist, rpc, now: fixedNow }: { persist: () => Promise<void>; rpc?: typeof xiaochanRpc; now?: Date },
 ) {
+  const now = fixedNow ?? new Date();
   const schedule = session.xiaochanSchedules?.[offerId];
   if (!schedule || schedule.state !== "scheduled" || Date.parse(schedule.runAt) > now.getTime()) return;
   schedule.state = "running";
@@ -62,19 +110,51 @@ export async function runXiaochanSchedule(
       throw createError({ statusCode: 409, statusMessage: "预约报名已过期" });
     if (accountId(session) !== schedule.accountId || JSON.stringify(session.location) !== JSON.stringify(schedule.location))
       throw createError({ statusCode: 409, statusMessage: "账号或地址已更新" });
-    if (!canScheduleEnrollment(schedule.offer, now, new Date(now.getTime() - 1)))
-      throw createError({ statusCode: 409, statusMessage: "活动已结束或不可报名" });
     if (session.xiaochanEnrollments?.[offerId]?.state === "enrolled") {
       delete session.xiaochanSchedules![offerId];
       await persist();
       return;
     }
-    // The saved activity fixes the user's chosen tier; the quota RPC checks availability at execution time.
-    const offer = { ...schedule.offer, collectedAt: now.toISOString() };
-    const index = session.offers.xiaochan.findIndex(row => row.id === offerId);
-    if (index < 0) session.offers.xiaochan.push(offer);
-    else session.offers.xiaochan[index] = offer;
-    await enrollXiaochan(session, offerId, { persist, rpc, now });
+    // Use the selected activity snapshot without changing pricing or activity availability.
+    const execute = async (offer: Offer, at: Date, advanceOrder = false, beforeSubmit?: () => boolean) => {
+      if (at.getTime() - Date.parse(schedule.runAt) > 60_000)
+        throw createError({ statusCode: 409, statusMessage: "预约报名已过期" });
+      if (!session.offers.xiaochan.some(row => row.id === offerId))
+        session.offers.xiaochan.push({ ...schedule.offer, collectedAt: at.toISOString() });
+      await enrollXiaochan(session, offerId, {
+        persist, rpc, now: at, advanceOrder, beforeSubmit,
+        offerSnapshot: { ...offer, collectedAt: at.toISOString() },
+      });
+      delete session.xiaochanSchedules![offerId];
+      await persist();
+    };
+    const ordinary = (offer: Offer, at: Date) => canScheduleEnrollment(offer, at, new Date(at.getTime() - 1));
+    if (ordinary(schedule.offer, now)) await execute(schedule.offer, now);
+    else if (schedule.advanceOrder === true) {
+      await withXiaochanAdvanceLock(schedule.accountId, async () => {
+        const at = fixedNow ?? new Date();
+        if (ordinary(schedule.offer, at)) return execute(schedule.offer, at);
+        // Preserve session identity for cross-session capacity checks; only override the activity snapshot.
+        const context = await loadXiaochanAdvanceContext(session, offerId, { rpc, now: at, offer: schedule.offer });
+        const checkedAt = fixedNow ?? new Date();
+        if (ordinary(context.offer, checkedAt)) return execute(context.offer, checkedAt);
+        const beforeSubmit = () => {
+          const at = fixedNow ?? new Date();
+          if (at.getTime() - Date.parse(schedule.runAt) > 60_000)
+            throw createError({ statusCode: 409, statusMessage: "预约报名已过期" });
+          if (ordinary(context.offer, at)) return false;
+          const window = xiaochanAdvanceWindow(context.offer, new Date(at.getTime() - 1));
+          if (!window || at.getTime() < window.start || at.getTime() >= window.end)
+            throw createError({ statusCode: 409, statusMessage: "当前不在超前抢单时段" });
+          assertAdvanceCouponCapacity(context.coupons, [...context.reservations,
+            { offerId, runAt: at.toISOString() },
+          ]);
+          return true;
+        };
+        beforeSubmit();
+        await execute(context.offer, checkedAt, true, beforeSubmit);
+      });
+    } else throw createError({ statusCode: 409, statusMessage: "活动已结束或不可报名" });
     delete session.xiaochanSchedules![offerId];
   } catch (error: any) {
     schedule.state = "failed";

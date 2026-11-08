@@ -1,3 +1,4 @@
+import { defineEventHandler } from "h3";
 import { loadSession, publicSession, sessionId } from "../../../utils/session";
 import { verifyMeituanLogin } from "../../../utils/meituan";
 

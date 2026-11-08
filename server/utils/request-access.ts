@@ -1,7 +1,8 @@
+import { timingSafeEqual } from "node:crypto";
 import { createError, getHeader, getRequestURL, type H3Event } from "h3";
-import { isAllowedHost, isAllowedPeer } from "./network";
+import { isAllowedHost, isAllowedPeer } from "./network.ts";
 
-export function assertRequestAccess(event: H3Event, allowDevProxy = false) {
+export function assertRequestAccess(event: H3Event) {
   const url = getRequestURL(event, {
     xForwardedHost: false,
     xForwardedProto: false,
@@ -12,19 +13,9 @@ export function assertRequestAccess(event: H3Event, allowDevProxy = false) {
   const computerChrome = /^\/api\/connections\/meituan\/browser\/?$/.test(pathname);
   const allowLan = !computerWeChat && !computerChrome && process.env.FOOD_ALLOW_LAN === "1";
   const socket = event.node.req.socket;
-  // The dev entry checks the TCP peer before Nitro forwards to its private Unix socket.
-  const devProxy =
-    allowDevProxy &&
-    !!process.env.NITRO_DEV_WORKER_ID &&
-    !socket.remoteAddress &&
-    !socket.localAddress &&
-    !socket.remotePort &&
-    Object.keys(socket.address?.() || {}).length === 0 &&
-    socket.readable &&
-    socket.writable;
   if (
     !isAllowedHost(url.hostname, allowLan) ||
-    (!devProxy && !isAllowedPeer(socket.remoteAddress, allowLan))
+    !isAllowedPeer(socket.remoteAddress, allowLan)
   )
     throw createError({
       statusCode: 403,
@@ -33,6 +24,13 @@ export function assertRequestAccess(event: H3Event, allowDevProxy = false) {
         ? "仅允许本机或局域网访问"
         : "此工具仅允许本机使用，请通过 localhost 访问",
     });
+  if (process.env.FOOD_DESKTOP === "1") {
+    const token = process.env.FOOD_SERVICE_TOKEN || "";
+    const supplied = getHeader(event, "x-food-desktop-token") || "";
+    if (!/^[a-f0-9]{64}$/.test(token) || !/^[a-f0-9]{64}$/.test(supplied) ||
+      !timingSafeEqual(Buffer.from(token), Buffer.from(supplied)))
+      throw createError({ statusCode: 403, statusMessage: "请求未授权" });
+  }
   const origin = getHeader(event, "origin");
   if (origin && origin !== url.origin)
     throw createError({ statusCode: 403, statusMessage: "拒绝跨站请求" });

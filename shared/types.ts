@@ -29,6 +29,16 @@ export interface SyncScope {
   radiusMeters: number;
 }
 
+export interface EnrollmentTimeWindow {
+  start: number;
+  end: number;
+}
+
+export interface XiaochanScheduleOptions {
+  offerId: string;
+  advanceWindows: EnrollmentTimeWindow[];
+}
+
 export interface EnrollmentSchedule {
   offerId: string;
   name: string;
@@ -59,6 +69,8 @@ export interface Offer {
   url?: string;
   collectedAt: string;
   source: "live" | "import";
+  enrollmentAvailable?: boolean;
+  advanceEnrollmentAvailable?: boolean;
   enrollment?: { state: "enrolled" | "unknown" | "cancel-unknown"; orderId?: string };
   enrollmentSchedule?: EnrollmentSchedule;
 }

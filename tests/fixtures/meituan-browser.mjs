@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chromium } from "../../.output/server/node_modules/playwright-core/index.mjs";
+import { chromium } from "../../dist/service/node_modules/playwright-core/index.mjs";
 
 const main = `<!doctype html><meta charset="utf-8"><title>美团远程登录测试</title>
 <style>body{margin:0;font:16px sans-serif;background:#fff9e7;min-height:1100px}h1{margin:24px;font-size:20px}button{position:absolute;left:24px;top:60px;width:120px;height:40px}iframe{position:absolute;top:110px;left:0;width:480px;height:440px;border:0;display:block}</style>

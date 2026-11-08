@@ -1,3 +1,4 @@
+import { defineEventHandler, readBody } from "h3";
 import { enrollXiaochan } from "../../utils/xiaochan-enrollment";
 import { loadSession, publicSession, saveSession, sessionId, withSessionLock } from "../../utils/session";
 

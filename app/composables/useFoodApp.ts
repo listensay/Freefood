@@ -1,13 +1,23 @@
+import { ref, computed, watch, onMounted, onBeforeUnmount, provide, inject } from "vue";
+import { useRoute, useRouter } from "vue-router";
+import { apiFetch as $fetch } from "../lib/api";
 import type { InjectionKey } from "vue";
-import type { BawangcanProvider, DashboardData, Provider, Offer } from "#shared/types";
+import type { BawangcanProvider, DashboardData, EnrollmentTimeWindow, Provider, Offer, XiaochanScheduleOptions } from "#shared/types";
+import { providerShortNames } from "#shared/types";
 import { addressFromGeocode } from "#shared/utils/location";
-import { defaultEnrollmentTime } from "#shared/utils/enrollment-time";
+import { defaultScheduleTime, scheduleTimeWindows, xiaochanAdvanceWindow } from "#shared/utils/xiaochan-advance-time";
 
 const foodAppKey: InjectionKey<ReturnType<typeof createFoodApp>> = Symbol("food-app");
+
+function enrollmentProvider(offerId: string): BawangcanProvider | undefined {
+  if (/^xiaochan:[1-9]\d*$/.test(offerId)) return "xiaochan";
+  if (/^waimai:[A-Za-z0-9_-]{1,128}:[A-Za-z0-9_-]{1,128}$/.test(offerId)) return "waimai";
+}
 
 function createFoodApp() {
   const loaded = ref(false);
   const route = useRoute();
+  const router = useRouter();
   const data = ref<DashboardData>({
     location: null,
     connections: {
@@ -26,6 +36,30 @@ function createFoodApp() {
   const scheduleOffer = ref<Offer | null>(null);
   const scheduleTime = ref("");
   const scheduleError = ref("");
+  const scheduleLoading = ref(false);
+  const scheduleOptionsError = ref("");
+  const scheduleAdvanceWindows = ref<EnrollmentTimeWindow[]>([]);
+  const scheduleUseAdvance = ref(false);
+  const scheduleCouponWindows = computed(() => {
+    const offer = scheduleOffer.value;
+    const potential = offer && xiaochanAdvanceWindow(offer, now.value);
+    if (!offer || !potential) return [];
+    return scheduleTimeWindows(offer, now.value, scheduleAdvanceWindows.value).flatMap(window => {
+      const start = Math.max(window.start, potential.start), end = Math.min(window.end, potential.end);
+      return Math.ceil(start / 1000) * 1000 < end ? [{ start, end }] : [];
+    });
+  });
+  const scheduleAdvanceAvailable = computed(() => scheduleCouponWindows.value.length > 0);
+  const scheduleWindows = computed(() => scheduleOffer.value
+    ? scheduleUseAdvance.value ? scheduleCouponWindows.value : scheduleTimeWindows(scheduleOffer.value, now.value) : []);
+  watch(scheduleAdvanceAvailable, available => {
+    if (!available && scheduleUseAdvance.value) setScheduleUseAdvance(false);
+  });
+  const scheduleUsesAdvance = computed(() => {
+    const potential = scheduleOffer.value && xiaochanAdvanceWindow(scheduleOffer.value, now.value);
+    const selected = Date.parse(`${scheduleTime.value}+08:00`);
+    return !!potential && selected < potential.end && scheduleWindows.value.some(window => selected >= window.start && selected < window.end);
+  });
   const busy = computed(() => actionBusy.value || (enrollingOfferIds.value.size ? "enroll" : ""));
   const syncing = ref(false),
     notice = ref<{ text: string; error: boolean; source?: "sync" } | null>(null);
@@ -46,6 +80,8 @@ function createFoodApp() {
   let refreshingSchedules = false;
   let mounted = false;
   let dataRevision = 0;
+  let scheduleRevision = 0;
+  let scheduleOptionsRequest = 0;
   const refreshingProfiles = new Set<BawangcanProvider>();
   watch(() => route.path, () => {
     filter.value = "all";
@@ -75,6 +111,7 @@ function createFoodApp() {
   });
   onBeforeUnmount(() => {
     mounted = false;
+    scheduleOptionsRequest++;
     clearInterval(syncTimer);
     clearInterval(scheduleTimer);
   });
@@ -92,6 +129,7 @@ function createFoodApp() {
   async function action(name: string, task: () => Promise<void>) {
     if (busy.value) return;
     dataRevision++;
+    scheduleAdvanceWindows.value = [];
     actionBusy.value = name;
     notice.value = null;
     try {
@@ -147,7 +185,7 @@ function createFoodApp() {
       data.value.connections[bawangcanProvider.value].state !== "connected" &&
       !["connected", "configured"].includes(data.value.connections.meituan.state)
     ) {
-      await navigateTo("/accounts");
+      await router.push("/accounts");
       notice.value = {
         text: "请先连接平台账号",
         error: false,
@@ -205,9 +243,11 @@ function createFoodApp() {
     });
   }
   function applyEnrollment(result: DashboardData, offerId: string) {
-    const enrollment = result.offers.xiaochan.find(row => row.id === offerId)?.enrollment;
+    const provider = enrollmentProvider(offerId);
+    if (!provider) return;
+    const enrollment = result.offers[provider].find(row => row.id === offerId)?.enrollment;
     const schedule = result.enrollmentSchedules?.find(row => row.offerId === offerId);
-    for (const row of data.value.offers.xiaochan) {
+    for (const row of data.value.offers[provider]) {
       if (row.id !== offerId) continue;
       if (enrollment) row.enrollment = enrollment;
       else delete row.enrollment;
@@ -216,7 +256,7 @@ function createFoodApp() {
     }
     data.value.enrollmentSchedules = (data.value.enrollmentSchedules || []).filter(row => row.offerId !== offerId);
     if (schedule) data.value.enrollmentSchedules.push(schedule);
-    data.value.connections.xiaochan = result.connections.xiaochan;
+    data.value.connections[provider] = result.connections[provider];
   }
   async function refreshSchedules() {
     const schedules = data.value.enrollmentSchedules?.filter(row => row.state !== "failed") || [];
@@ -227,10 +267,12 @@ function createFoodApp() {
       const result = await $fetch<DashboardData>("/api/dashboard", { timeout: 10_000 });
       if (!mounted || revision !== dataRevision) return;
       for (const previous of schedules) {
+        const provider = enrollmentProvider(previous.offerId);
+        if (!provider) continue;
         applyEnrollment(result, previous.offerId);
         const schedule = result.enrollmentSchedules?.find(row => row.offerId === previous.offerId);
         if (schedule?.state === "failed") notice.value = { text: schedule.message || "预约报名失败", error: true };
-        else if (!schedule && result.offers.xiaochan.some(row => row.id === previous.offerId && row.enrollment?.state === "enrolled"))
+        else if (!schedule && result.offers[provider].some(row => row.id === previous.offerId && row.enrollment?.state === "enrolled"))
           notice.value = { text: "预约报名成功", error: false };
       }
     } catch {} finally {
@@ -240,6 +282,7 @@ function createFoodApp() {
   async function enrollmentAction(offerId: string, name: string, task: () => Promise<DashboardData>, text: string, failed?: (message: string) => void) {
     if (actionBusy.value || enrollingOfferIds.value.has(offerId)) return false;
     dataRevision++;
+    scheduleAdvanceWindows.value = [];
     enrollingOfferIds.value.add(offerId);
     enrollmentActions.value[offerId] = name;
     notice.value = null;
@@ -257,40 +300,99 @@ function createFoodApp() {
       delete enrollmentActions.value[offerId];
     }
   }
-  async function enrollXiaochan(offer: Offer) {
-    if (actionBusy.value || enrollingOfferIds.value.has(offer.id) || offer.enrollment?.state === "enrolled") return;
-    if (data.value.connections.xiaochan.state !== "connected") {
-      await navigateTo("/accounts");
-      notice.value = { text: "请先登录小蚕", error: false };
+  async function enroll(offer: Offer) {
+    const provider = enrollmentProvider(offer.id);
+    if (!provider || provider !== offer.provider || offer.source !== "live" ||
+      actionBusy.value || enrollingOfferIds.value.has(offer.id) || offer.enrollment?.state === "enrolled") return;
+    if (data.value.connections[provider].state !== "connected") {
+      await router.push("/accounts");
+      notice.value = { text: `请先登录${providerShortNames[provider]}`, error: false };
       return;
     }
     const checking = offer.enrollment?.state === "unknown";
-    await enrollmentAction(offer.id, "enroll", () => post<DashboardData>("/api/xiaochan/enroll", { offerId: offer.id }), checking ? "报名已确认" : "报名成功");
+    await enrollmentAction(offer.id, "enroll", () => post<DashboardData>(`/api/${provider}/enroll`, { offerId: offer.id }), checking ? "报名已确认" : "报名成功");
   }
   async function cancelEnrollment(offer: Offer) {
+    const provider = enrollmentProvider(offer.id);
+    if (!provider || provider !== offer.provider || offer.source !== "live") return;
     if (offer.enrollment?.state !== "cancel-unknown" && !window.confirm(`取消「${offer.name}」的报名？`)) return;
-    await enrollmentAction(offer.id, "cancel", () => post<DashboardData>("/api/xiaochan/cancel", { offerId: offer.id }), "报名已取消");
+    await enrollmentAction(offer.id, "cancel", () => post<DashboardData>(`/api/${provider}/cancel`, { offerId: offer.id }), "报名已取消");
   }
-  function openSchedule(offer: Offer) {
-    scheduleOffer.value = offer;
-    scheduleTime.value = defaultEnrollmentTime(offer, now.value);
+  function setScheduleUseAdvance(enabled: boolean) {
+    const offer = scheduleOffer.value;
+    if (!offer || (enabled && !scheduleAdvanceAvailable.value)) return;
+    scheduleUseAdvance.value = enabled;
+    scheduleTime.value = defaultScheduleTime(offer, now.value, enabled ? scheduleCouponWindows.value : []);
     scheduleError.value = "";
+  }
+  async function openSchedule(offer: Offer) {
+    const provider = enrollmentProvider(offer.id);
+    if (!provider || provider !== offer.provider || offer.source !== "live") return;
+    const request = ++scheduleOptionsRequest;
+    const revision = dataRevision;
+    scheduleRevision = revision;
+    scheduleOffer.value = offer;
+    scheduleUseAdvance.value = false;
+    scheduleAdvanceWindows.value = [];
+    scheduleTime.value = defaultScheduleTime(offer, now.value);
+    scheduleError.value = "";
+    scheduleOptionsError.value = "";
+    scheduleLoading.value = provider === "xiaochan" && !!xiaochanAdvanceWindow(offer, now.value);
     scheduleDialog.value?.showModal();
+    if (!scheduleLoading.value) return;
+    const initialTime = scheduleTime.value;
+    const current = () => request === scheduleOptionsRequest && revision === dataRevision &&
+      scheduleOffer.value?.id === offer.id && scheduleDialog.value?.open;
+    try {
+      const result = await post<XiaochanScheduleOptions>("/api/xiaochan/schedule-options", { offerId: offer.id });
+      if (!current()) return;
+      if (result.offerId !== offer.id || !Array.isArray(result.advanceWindows)) throw new Error("Invalid schedule options");
+      scheduleAdvanceWindows.value = result.advanceWindows;
+      if (scheduleTime.value === initialTime && scheduleAdvanceAvailable.value)
+        setScheduleUseAdvance(true);
+    } catch {
+      if (!current()) return;
+      scheduleAdvanceWindows.value = [];
+      scheduleOptionsError.value = "卡券查询失败，可预约普通时段";
+    } finally {
+      if (request === scheduleOptionsRequest) scheduleLoading.value = false;
+    }
   }
   async function saveSchedule() {
-    if (!scheduleOffer.value || !scheduleTime.value) return;
+    const offer = scheduleOffer.value;
+    if (!offer || !scheduleTime.value || scheduleLoading.value) return;
+    const provider = enrollmentProvider(offer.id);
+    if (!provider || provider !== offer.provider || offer.source !== "live") return;
     scheduleError.value = "";
-    const success = await enrollmentAction(scheduleOffer.value.id, "schedule", () => post<DashboardData>("/api/xiaochan/schedule", {
-      offerId: scheduleOffer.value!.id, runAt: `${scheduleTime.value.length === 16 ? scheduleTime.value + ':00' : scheduleTime.value}+08:00`,
-    }), "预约报名已设置", message => { scheduleError.value = message; });
+    if (scheduleRevision !== dataRevision) {
+      scheduleError.value = "活动已更新，请重新选择";
+      return;
+    }
+    const localTime = scheduleTime.value.length === 16 ? `${scheduleTime.value}:00` : scheduleTime.value;
+    const runAt = `${localTime}+08:00`;
+    const selected = Date.parse(runAt);
+    if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d$/.test(localTime) ||
+      !scheduleWindows.value.some(window => selected >= window.start && selected < window.end)) {
+      scheduleError.value = "请选择有效的报名时间";
+      return;
+    }
+    const request = scheduleOptionsRequest;
+    const current = () => request === scheduleOptionsRequest && scheduleOffer.value?.id === offer.id;
+    const success = await enrollmentAction(offer.id, "schedule", () => post<DashboardData>(`/api/${provider}/schedule`, {
+      offerId: offer.id, runAt,
+    }), "预约报名已设置", message => { if (current()) scheduleError.value = message; });
+    if (!current()) return;
     if (success) scheduleDialog.value?.close();
     else {
+      scheduleRevision = dataRevision;
       scheduleError.value ||= "预约报名设置失败";
       if (notice.value?.text === scheduleError.value) notice.value = null;
     }
   }
   async function cancelSchedule(offerId: string) {
-    await enrollmentAction(offerId, "schedule", () => $fetch<DashboardData>("/api/xiaochan/schedule", {
+    const provider = enrollmentProvider(offerId);
+    if (!provider) return;
+    await enrollmentAction(offerId, "schedule", () => $fetch<DashboardData>(`/api/${provider}/schedule`, {
       method: "DELETE", body: { offerId }, headers: { "x-food-request": "1" },
     }), "预约报名已取消");
   }
@@ -414,8 +516,10 @@ function createFoodApp() {
   return {
     loaded, data, busy, enrollingOfferIds, enrollmentActions, now, syncing, notice, filter, sort, bawangcanProvider,
     scheduleDialog, scheduleOffer, scheduleTime, scheduleError, openSchedule, saveSchedule, cancelSchedule, cancelEnrollment,
+    scheduleLoading, scheduleOptionsError, scheduleWindows, scheduleUsesAdvance,
+    scheduleUseAdvance, scheduleAdvanceAvailable, scheduleCouponWindows, setScheduleUseAdvance,
     locationDialog, locationForm, locationError,
-    sync, changeCombination, connectComputerWeChat, enrollXiaochan, connectMeituanBrowser,
+    sync, changeCombination, connectComputerWeChat, enroll, connectMeituanBrowser,
     disconnect, openLocation, locateAddress, saveLocation,
   };
 }

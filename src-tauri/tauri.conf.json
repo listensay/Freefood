@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "叠个饭",
+  "version": "0.1.0",
+  "identifier": "com.freefood.desktop",
+  "build": {
+    "beforeDevCommand": "npm run desktop:prepare && npm run dev:ui",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build && npm run desktop:prepare",
+    "frontendDist": "../dist/client"
+  },
+  "app": {
+    "windows": [{ "label": "main", "title": "叠个饭", "width": 1280, "height": 820, "minWidth": 800, "minHeight": 600 }],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src ipc: http://ipc.localhost https://api.bigdatacloud.net; object-src 'none'; base-uri 'self'",
+      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src ipc: http://ipc.localhost ws://127.0.0.1:1420 http://127.0.0.1:1420 https://api.bigdatacloud.net; object-src 'none'; base-uri 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "externalBin": ["binaries/food-node"],
+    "resources": { "../dist/service/": "service/" },
+    "macOS": { "minimumSystemVersion": "13.0", "infoPlist": "Info.plist", "signingIdentity": "-", "entitlements": "Entitlements.plist" }
+  }
+}

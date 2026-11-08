@@ -1,11 +1,14 @@
 <script setup lang="ts">
+import { computed } from "vue";
+import RemoteImage from "./RemoteImage.vue";
+import { useFoodApp } from "../composables/useFoodApp";
 import { Check, MapPin, Utensils } from "@lucide/vue";
 import type { StoreMatchGroup } from "#shared/types";
 import { providerNames } from "#shared/types";
 import { activeAt, estimatePrice, money, priceOutcome, ruleLabel, reviewBonusLabel, suggestedPaidCents } from "#shared/utils/pricing";
 import { todayEnrollmentWindow } from "#shared/utils/enrollment-time";
 const props = defineProps<{ group: StoreMatchGroup }>();
-const { busy, enrollingOfferIds, enrollmentActions, now, enrollXiaochan, cancelEnrollment, openSchedule, cancelSchedule } = useFoodApp();
+const { busy, enrollingOfferIds, enrollmentActions, now, enroll, cancelEnrollment, openSchedule, cancelSchedule } = useFoodApp();
 const scheduleTime = (value: string) => new Date(value).toLocaleTimeString("zh-CN", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
 const match = computed(() => props.group.matches[0]!);
 const variants = computed(() => props.group.matches.map(match => {
@@ -22,20 +25,18 @@ const distance = computed(() => {
       ? `${d} m`
       : `${(d / 1000).toFixed(1)} km`;
 });
-const imageFailed = ref(false);
 </script>
 
 <template>
   <article class="store-card" :class="{ 'has-variants': variants.length > 1 }">
     <div class="store-main">
       <div class="store-picture">
-        <img
-          v-if="!imageFailed && (match.bawangcan.image || match.meituan.image)"
-          :src="match.bawangcan.image || match.meituan.image"
+        <RemoteImage
+          :src="match.bawangcan.image"
+          :fallback-src="match.meituan.image"
           :alt="match.bawangcan.category"
           loading="lazy"
-          @error="imageFailed = true"
-        /><Utensils v-else :size="26" />
+        ><Utensils :size="26" /></RemoteImage>
       </div>
       <div class="store-info">
         <h3>{{ match.bawangcan.name }}</h3>
@@ -85,19 +86,19 @@ const imageFailed = ref(false);
             ><small>¥</small>{{ money(outcome.amountCents) }}</strong
           >
         </div>
-        <div v-if="match.bawangcan.provider === 'xiaochan' && match.bawangcan.source === 'live'" class="enrollment-actions">
+        <div v-if="(match.bawangcan.provider === 'xiaochan' || (match.bawangcan.provider === 'waimai' && match.bawangcan.enrollmentAvailable === true)) && match.bawangcan.source === 'live'" class="enrollment-actions">
         <button
           class="button primary enrollment-button"
           :disabled="(!!busy && busy !== 'enroll') || enrollingOfferIds.has(match.bawangcan.id) || match.bawangcan.enrollment?.state === 'enrolled' || (match.bawangcan.enrollmentSchedule && match.bawangcan.enrollmentSchedule.state !== 'failed') || (!match.bawangcan.enrollment && !activeAt(match.bawangcan, now))"
           :aria-busy="enrollingOfferIds.has(match.bawangcan.id)"
-          @click="match.bawangcan.enrollment?.state === 'cancel-unknown' ? cancelEnrollment(match.bawangcan) : enrollXiaochan(match.bawangcan)"
+          @click="match.bawangcan.enrollment?.state === 'cancel-unknown' ? cancelEnrollment(match.bawangcan) : enroll(match.bawangcan)"
         >{{ match.bawangcan.enrollment?.state === 'enrolled' ? '已报名'
           : enrollingOfferIds.has(match.bawangcan.id) ? (enrollmentActions[match.bawangcan.id] === 'cancel' ? '查询中…' : match.bawangcan.enrollment?.state === 'unknown' ? '查询中…' : '报名中…')
             : match.bawangcan.enrollmentSchedule?.state === 'running' ? '报名中…'
             : match.bawangcan.enrollment?.state === 'cancel-unknown' ? '查看取消'
               : match.bawangcan.enrollment?.state === 'unknown' ? '查看报名'
                 : match.bawangcan.enrollmentSchedule?.state === 'scheduled' ? `${scheduleTime(match.bawangcan.enrollmentSchedule.runAt)} 报名` : '报名' }}</button>
-        <button v-if="match.bawangcan.enrollment?.state === 'enrolled'" class="button secondary enrollment-action-button cancel-enrollment-button"
+        <button v-if="match.bawangcan.enrollment?.state === 'enrolled' || (match.bawangcan.provider === 'waimai' && match.bawangcan.enrollment?.state === 'unknown' && match.bawangcan.enrollment.orderId)" class="button secondary enrollment-action-button cancel-enrollment-button"
           :disabled="(!!busy && busy !== 'enroll') || enrollingOfferIds.has(match.bawangcan.id)"
           @click="cancelEnrollment(match.bawangcan)"
         >{{ enrollmentActions[match.bawangcan.id] === 'cancel' ? '取消中…' : '取消报名' }}</button>

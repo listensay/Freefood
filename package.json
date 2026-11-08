@@ -1,32 +1,49 @@
 {
-  "name": "Food",
+  "name": "freefood",
   "type": "module",
   "private": true,
   "scripts": {
-    "build": "nuxt build",
-    "dev": "nuxt dev --host 127.0.0.1",
-    "dev:lan": "FOOD_ALLOW_LAN=1 nuxt dev --host 0.0.0.0",
-    "generate": "nuxt generate",
-    "preview": "nuxt preview",
-    "postinstall": "nuxt prepare",
-    "test": "tsx --test tests/core.test.ts tests/waimai.test.ts tests/network.test.ts tests/remote-input.test.ts tests/chrome-meituan.test.ts tests/meituan-sync.test.ts tests/xiaochan-rpc.test.ts tests/xiaochan-enrollment.test.ts tests/wechat-xiaochan.test.ts tests/wechat-waimai.test.ts",
-    "typecheck": "nuxt typecheck",
-    "test:integration": "npm run build && tsx --test tests/api.test.ts tests/lan.test.ts tests/remote.test.ts && tsx --test tests/dev-lan.test.ts",
-    "start": "HOST=127.0.0.1 node .output/server/index.mjs",
-    "start:lan": "FOOD_ALLOW_LAN=1 HOST=0.0.0.0 node .output/server/index.mjs",
-    "format": "prettier --write app shared server tests nuxt.config.ts package.json"
+    "build": "node scripts/build.mjs",
+    "dev": "tauri dev",
+    "dev:lan": "FOOD_ALLOW_LAN=1 node scripts/dev.mjs",
+    "preview": "node dist/service/index.mjs",
+    "test": "tsx --test tests/core.test.ts tests/waimai.test.ts tests/waimai-enrollment.test.ts tests/waimai-schedules.test.ts tests/waimai-ui.test.ts tests/network.test.ts tests/remote-input.test.ts tests/chrome-meituan.test.ts tests/meituan-sync.test.ts tests/xiaochan-rpc.test.ts tests/xiaochan-enrollment.test.ts tests/xiaochan-advance-coupons.test.ts tests/xiaochan-advance-lock.test.ts tests/xiaochan-advance-time.test.ts tests/xiaochan-advance.test.ts tests/wechat-xiaochan.test.ts tests/wechat-waimai.test.ts tests/session-database.test.ts tests/desktop-release.test.ts",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json",
+    "test:integration": "npm run build && tsx --test --test-concurrency=1 tests/api.test.ts tests/lan.test.ts tests/remote.test.ts tests/desktop.test.ts tests/images.test.ts tests/navigation.test.ts tests/accounts.test.ts && tsx --test tests/dev-lan.test.ts",
+    "start": "node dist/service/index.mjs",
+    "start:lan": "FOOD_ALLOW_LAN=1 HOST=0.0.0.0 node dist/service/index.mjs",
+    "format": "prettier --write app shared server scripts tests vite.config.ts package.json",
+    "dev:web": "node scripts/dev.mjs",
+    "desktop:build": "tauri build",
+    "desktop:prepare": "node scripts/prepare-sidecar.mjs",
+    "desktop:artifacts": "bash scripts/package-desktop.sh",
+    "tauri": "tauri",
+    "dev:ui": "vite",
+    "data:migrate": "tsx scripts/migrate-data.ts"
   },
   "dependencies": {
     "@lucide/vue": "^1.67.0",
-    "nuxt": "^4.6.3",
+    "@tauri-apps/api": "~2.11.1",
+    "@tauri-apps/plugin-opener": "~2.5.4",
+    "h3": "^1.15.11",
+    "ofetch": "^1.5.1",
     "playwright-core": "^1.64.1",
     "vue": "^3.5.44",
     "vue-router": "^5.4.0"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4",
     "@types/node": "^26.6.6",
+    "@vitejs/plugin-vue": "^6.0.10",
+    "esbuild": "^0.27.0",
     "prettier": "^3.9.10",
     "tsx": "^4.23.15",
+    "typescript": "^6.0.0",
+    "vite": "^8.0.0",
     "vue-tsc": "^3.3.14"
+  },
+  "version": "0.1.0",
+  "engines": {
+    "node": ">=24.16.0"
   }
 }

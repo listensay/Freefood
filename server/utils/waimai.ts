@@ -31,7 +31,7 @@ export interface WaimaiAccount {
   token: string;
 }
 
-function assertAccount(account: WaimaiAccount) {
+export function assertWaimaiAccount(account: WaimaiAccount) {
   if (!account || typeof account.userId !== "string" ||
     !/^[A-Za-z0-9_-]{1,128}$/.test(account.userId) ||
     typeof account.uid !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(account.uid) ||
@@ -117,11 +117,13 @@ async function request(
     throw createError({
       statusCode: 502,
       statusMessage: "歪麦连接超时或网络异常，请稍后重试",
+      data: { waimaiOutcome: "unknown" },
     });
   }
   if (!response.ok)
     throw createError({
       statusCode: response.status === 401 ? 401 : 502,
+      data: { waimaiOutcome: [401, 403, 429].includes(response.status) ? "rejected" : "unknown" },
       statusMessage:
         response.status === 401
           ? "歪麦登录已失效，请重新连接"
@@ -133,18 +135,22 @@ async function request(
 }
 
 function checkStatus(data: any, expected: number | number[]) {
-  if (["number", "string"].includes(typeof data?.code) && /^\d+$/.test(String(data.code)) &&
-    (Array.isArray(expected) ? expected : [expected]).includes(Number(data.code))) return;
-  if ([13001, 13002].includes(Number(data?.code)))
-    throw createError({ statusCode: 422, statusMessage: "请在电脑微信的歪麦小程序中完成验证后重试" });
-  if ([-3, 401, 403].includes(Number(data?.code)))
+  const valid = ["number", "string"].includes(typeof data?.code) && /^-?\d+$/.test(String(data.code)) &&
+    Number.isSafeInteger(Number(data.code));
+  const code = valid ? Number(data.code) : undefined;
+  if (code !== undefined && (Array.isArray(expected) ? expected : [expected]).includes(code)) return;
+  if (code !== undefined && [13001, 13002].includes(code))
+    throw createError({ statusCode: 422, statusMessage: "请在电脑微信的歪麦小程序中完成验证后重试", data: { waimaiOutcome: "rejected" } });
+  if (code !== undefined && [-3, 401, 403].includes(code))
     throw createError({
       statusCode: 401,
       statusMessage: "歪麦登录已失效，请重新连接",
+      data: { waimaiOutcome: "rejected" },
     });
   throw createError({
     statusCode: 502,
     statusMessage: "歪麦接口拒绝访问，请稍后重试",
+    data: { waimaiOutcome: code !== undefined && [-1, 400, 429].includes(code) ? "rejected" : "unknown" },
   });
 }
 
@@ -152,7 +158,7 @@ export async function verifyWaimaiAccount(
   account: WaimaiAccount,
   transport: typeof fetch = fetch,
 ): Promise<AccountProfile> {
-  assertAccount(account);
+  assertWaimaiAccount(account);
   const response = await request(USER_URL, {
     headers: commonHeaders(account.token, ""),
     body: JSON.stringify({ json: encrypt(JSON.stringify({
@@ -235,7 +241,11 @@ export function normalizeWaimai(response: any): Offer[] {
         (!Number.isSafeInteger(inventory) || inventory < 0)
       )
         throw new Error("歪麦活动名额格式发生变化");
-      const id = `waimai:${row.id}:${sku.id}`;
+      const activityId = [sku.overbearFoodId, sku.overbearfoodId, sku.overbearFoodEntityId,
+        sku.overbearfoodEntityId, sku.buyOverbearFoodId, sku.buyOverbearfoodId,
+        sku.packageId, sku.packageEntityId, sku.foodId, sku.entityId]
+        .find(value => value != null && value !== "") ?? sku.id;
+      const id = `waimai:${row.id}:${activityId}`;
       if (seen.has(id)) continue;
       seen.add(id);
       const poi = String(row.wm_poi_id || row.meituanPoiId || "");
@@ -263,26 +273,19 @@ export function normalizeWaimai(response: any): Offer[] {
         rule: { kind: "fixed", thresholdCents, cashbackCents: rebate - vip },
         collectedAt,
         source: "live",
+        enrollmentAvailable: Number(row.shopPlatformType) === 1 &&
+          /^[A-Za-z0-9_-]{1,128}$/.test(String(row.id)) && /^[A-Za-z0-9_-]{1,128}$/.test(String(activityId)),
       });
     }
   }
   return offers;
 }
 
-export async function fetchWaimai(
-  account: WaimaiAccount,
-  location: LocationSettings,
-  transport: typeof fetch = fetch,
-  scope?: SyncScope,
-): Promise<Offer[]> {
-  assertAccount(account);
-  const token = account.token;
-  const city = location.cityName?.trim();
-  if (!city)
-    throw createError({
-      statusCode: 400,
-      statusMessage: "请填写收餐地址的城市名称",
-    });
+async function encryptedService(
+  token: string,
+  city: string,
+  transport: typeof fetch,
+) {
   const config = await request(
     CONFIG_URL,
     {
@@ -338,6 +341,72 @@ export async function fetchWaimai(
     { key: publicKey, padding: constants.RSA_PKCS1_PADDING },
     Buffer.from(Buffer.from(key).toString("base64")),
   ).toString("base64");
+  return async (url: string, body: Record<string, unknown>, successCodes = [200, 0]) => {
+    const response = await request(url, {
+      headers: { ...commonHeaders(token, city), "encrypt-key": encryptKey },
+      body: encrypt(JSON.stringify(body), key),
+    }, transport);
+    try {
+      const text = await response.text();
+      const encryptedKey = response.headers.get("encrypt-key");
+      const data = JSON.parse(encryptedKey ? decrypt(text, responseKey(encryptedKey, privateKey)) : text);
+      checkStatus(data, successCodes);
+      return data;
+    } catch (error: any) {
+      if (error.statusCode) throw error;
+      throw createError({ statusCode: 502, statusMessage: "歪麦返回内容异常，请稍后重试" });
+    }
+  };
+}
+
+export async function prepareWaimaiSignup(account: WaimaiAccount, city: string, transport: typeof fetch = fetch) {
+  assertWaimaiAccount(account);
+  const send = await encryptedService(account.token, city, transport);
+  return (body: Record<string, unknown>) => send(
+    "https://wmapp-api-v2.waimaimingtang.com/api/order/waimaimt-web-order/overbear/signup", body, [200, 1],
+  );
+}
+
+export async function waimaiOrderRequest(
+  account: WaimaiAccount,
+  city: string,
+  service: "api_overbear_orders_list" | "api_overbear_cancel_sign_up",
+  body: Record<string, unknown>,
+  transport: typeof fetch = fetch,
+) {
+  assertWaimaiAccount(account);
+  const response = await request(
+    `https://fz-gateway.waimaimingtang.com/api/api/v2/overbearfood/${service}`,
+    {
+      headers: commonHeaders(account.token, city),
+      body: JSON.stringify({ json: encrypt(JSON.stringify({ ...body, serviceNoStr: service }), LEGACY_KEY) }),
+    }, transport,
+  );
+  try {
+    const outer = await response.json();
+    checkStatus(outer, 1);
+    return { ...outer, data: typeof outer.data === "string" ? JSON.parse(decrypt(outer.data, LEGACY_KEY)) : outer.data };
+  } catch (error: any) {
+    if (error.statusCode) throw error;
+    throw createError({ statusCode: 502, statusMessage: "歪麦返回内容异常，请稍后重试" });
+  }
+}
+
+export async function fetchWaimai(
+  account: WaimaiAccount,
+  location: LocationSettings,
+  transport: typeof fetch = fetch,
+  scope?: SyncScope,
+): Promise<Offer[]> {
+  assertWaimaiAccount(account);
+  const token = account.token;
+  const city = location.cityName?.trim();
+  if (!city)
+    throw createError({
+      statusCode: 400,
+      statusMessage: "请填写收餐地址的城市名称",
+    });
+  const send = await encryptedService(token, city, transport);
   const params = {
     userLongitude: String(location.longitude),
     userLatitude: String(location.latitude),
@@ -365,26 +434,8 @@ export async function fetchWaimai(
   };
   let cursor: unknown = null;
   const fetchPage = async (): Promise<ActivityPage> => {
-    const response = await request(
-      SHOP_URL,
-      {
-        headers: { ...commonHeaders(token, city), "encrypt-key": encryptKey },
-        body: encrypt(
-          JSON.stringify({ ...params, scrollPageData: cursor }),
-          key,
-        ),
-      },
-      transport,
-    );
     try {
-      const text = await response.text();
-      const encryptedKey = response.headers.get("encrypt-key");
-      const data = JSON.parse(
-        encryptedKey
-          ? decrypt(text, responseKey(encryptedKey, privateKey))
-          : text,
-      );
-      checkStatus(data, [200, 0]);
+      const data = await send(SHOP_URL, { ...params, scrollPageData: cursor });
       const offers = normalizeWaimai(data);
       cursor = data.data.scrollPageData ?? null;
       if (data.data.hasMore === true && cursor === null)

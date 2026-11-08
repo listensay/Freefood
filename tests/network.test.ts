@@ -192,7 +192,7 @@ test("forwarded headers cannot override the host, origin or cookie transport sec
   });
 });
 
-test("only the private dev Unix socket can skip the peer check after the entry guard", () => {
+test("API requests without a verified TCP peer are rejected even in development", () => {
   withLan(true, () => {
     const request = event({ host: "192.168.1.20:3000" });
     Object.defineProperties(request.node.req.socket, {
@@ -200,18 +200,10 @@ test("only the private dev Unix socket can skip the peer check after the entry g
       readable: { value: true },
       writable: { value: true },
     });
-    const previous = process.env.NITRO_DEV_WORKER_ID;
-    process.env.NITRO_DEV_WORKER_ID = "1";
-    try {
-      assert.throws(() => assertRequestAccess(request), { statusCode: 403 });
-      assertRequestAccess(request, true);
-      assert.throws(() => assertRequestAccess(event({}, "8.8.8.8"), true), {
-        statusCode: 403,
-      });
-    } finally {
-      if (previous === undefined) delete process.env.NITRO_DEV_WORKER_ID;
-      else process.env.NITRO_DEV_WORKER_ID = previous;
-    }
+    assert.throws(() => assertRequestAccess(request), { statusCode: 403 });
+    assert.throws(() => assertRequestAccess(event({}, "8.8.8.8")), {
+      statusCode: 403,
+    });
   });
 });
 

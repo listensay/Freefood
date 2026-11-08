@@ -1,3 +1,4 @@
+import { defineEventHandler, createError } from "h3";
 import {
   loadSession,
   saveSession,

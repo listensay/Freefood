@@ -1,23 +1,18 @@
 <script setup lang="ts">
+import RemoteImage from "./RemoteImage.vue";
 import { UserRound } from "@lucide/vue";
 import type { AccountProfile } from "#shared/types";
 
-const props = defineProps<{ profile: AccountProfile }>();
-const avatarFailed = ref(false);
-watch(() => props.profile.avatar, () => { avatarFailed.value = false; });
+defineProps<{ profile: AccountProfile }>();
 </script>
 
 <template>
   <div class="account-profile">
     <div class="account-avatar">
-      <img
-        v-if="profile.avatar && !avatarFailed"
+      <RemoteImage
         :src="profile.avatar"
         alt="用户头像"
-        referrerpolicy="no-referrer"
-        @error="avatarFailed = true"
-      />
-      <UserRound v-else :size="24" aria-hidden="true" />
+      ><UserRound :size="24" aria-hidden="true" /></RemoteImage>
     </div>
     <dl>
       <div v-if="profile.nickname"><dt>昵称</dt><dd>{{ profile.nickname }}</dd></div>

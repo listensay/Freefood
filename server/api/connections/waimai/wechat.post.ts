@@ -1,6 +1,8 @@
+import { defineEventHandler, readBody, createError } from "h3";
 import { readWeChatWaimaiLogin } from "../../../utils/wechat-waimai";
 import { verifyWaimaiAccount } from "../../../utils/waimai";
 import { loadSession, saveSession, publicSession, sessionId, withSessionLock } from "../../../utils/session";
+import { armWaimaiSchedules } from "../../../utils/waimai-schedules";
 
 export default defineEventHandler(async event => {
   const id = sessionId(event);
@@ -23,8 +25,20 @@ export default defineEventHandler(async event => {
       offers: changed ? { ...session.offers, waimai: [] } : session.offers,
       updatedAt: { ...session.updatedAt },
     };
-    if (changed) delete next.updatedAt.waimai;
+    if (changed) {
+      delete next.waimaiEnrollments;
+      delete next.waimaiSchedules;
+      delete next.updatedAt.waimai;
+    }
+    if (!changed && session.waimaiAccount?.userId !== account.userId && next.waimaiSchedules) {
+      next.waimaiSchedules = structuredClone(next.waimaiSchedules);
+      for (const schedule of Object.values(next.waimaiSchedules)) {
+        if (schedule.accountId === `${account.uid}:${session.waimaiAccount?.userId}`)
+          schedule.accountId = `${account.uid}:${account.userId}`;
+      }
+    }
     await saveSession(id, next);
+    armWaimaiSchedules(id, next);
     return publicSession(next);
   });
 });

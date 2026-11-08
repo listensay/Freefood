@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, generateKeyPairSync } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, generateKeyPairSync, privateDecrypt, constants } from "node:crypto";
 
 const keys = generateKeyPairSync("rsa", { modulusLength: 1024 });
 const cipher = createCipheriv(
@@ -18,6 +18,20 @@ const config = Buffer.concat([
 const realFetch = globalThis.fetch;
 const enrollmentAttempts = new Map();
 const cancelledOrders = new Set();
+const advanceCardReads = new Map();
+const consumedAdvanceCoupons = new Set();
+const waimaiOrders = new Map();
+const waimaiDecrypt = (text, key) => {
+  const cipher = createDecipheriv(`aes-${Buffer.byteLength(key) * 8}-ecb`, Buffer.from(key), null);
+  return Buffer.concat([cipher.update(Buffer.from(text, "base64")), cipher.final()]).toString();
+};
+const waimaiBody = (init, modern = false) => {
+  if (!modern) return JSON.parse(waimaiDecrypt(JSON.parse(String(init.body)).json, "jnd674751fh6fkgu"));
+  const block = privateDecrypt({ key: keys.privateKey, padding: constants.RSA_NO_PADDING },
+    Buffer.from(new Headers(init.headers).get("encrypt-key"), "base64"));
+  const key = Buffer.from(block.subarray(block.indexOf(0, 2) + 1).toString(), "base64").toString();
+  return JSON.parse(waimaiDecrypt(init.body, key));
+};
 const md5 = text => createHash("md5").update(text).digest("hex");
 const validSignature = headers => {
   const identity = headers.get("x-teemo") || "0";
@@ -37,6 +51,22 @@ globalThis.fetch = async (url, init) => {
   const hostname = new URL(String(url)).hostname;
   if (hostname === "fz-gateway.waimaimingtang.com") {
     const pathname = new URL(String(url)).pathname.replace(/\/+/g, "/");
+    if (pathname.startsWith("/api/api/v2/overbearfood/")) {
+      const token = new Headers(init.headers).get("token"), body = waimaiBody(init);
+      if (!token || new Headers(init.headers).get("application") !== "overbear_one") return Response.json({ code: 401 });
+      const records = waimaiOrders.get(token) || [];
+      if (body.serviceNoStr === "api_overbear_orders_list")
+        return Response.json({ code: 1, data: records.slice((body.page - 1) * body.limit, body.page * body.limit), count: records.length });
+      if (body.serviceNoStr === "api_overbear_cancel_sign_up") {
+        const order = records.find(row => row.buyOverbearfoodId === body.buyOverbearfoodId);
+        if (!order || body.status !== "buy_cancelled" || body.type !== "overbear_food" ||
+          body.overbearfoodId !== order.overbearfoodId || body.serviceId !== order.serviceId)
+          return Response.json({ code: 400 });
+        order.status = "buy_cancelled";
+        return Response.json({ code: 1 });
+      }
+      return Response.json({ code: 400 });
+    }
     if (pathname === "/api/api/v2/user/api_user_info_one") {
       const headers = new Headers(init?.headers), token = headers.get("token");
       const legacyKey = Buffer.from("jnd674751fh6fkgu");
@@ -64,6 +94,21 @@ globalThis.fetch = async (url, init) => {
   if (hostname === "wmapp-api-v2.waimaimingtang.com") {
     const token = new Headers(init?.headers).get("token");
     if (!token) return Response.json({ code: 401 });
+    if (new URL(String(url)).pathname === "/api/order/waimaimt-web-order/overbear/signup") {
+      const body = waimaiBody(init, true);
+      if (body.businessId !== "api-store" || !["api-sku", "api-sku-2"].includes(body.overbearfoodId) ||
+        body.type !== "overbear_one" || body.orderSourcePage !== "MEAL_DETAIL" ||
+        body.serviceNoStr !== "api_overbear_sign_up" || body.buyChannel !== "autonomy" || !body.userId)
+        return Response.json({ code: 400 });
+      const records = waimaiOrders.get(token) || [];
+      if (records.some(row => row.overbearfoodId === body.overbearfoodId && row.status !== "buy_cancelled"))
+        return Response.json({ code: 400 });
+      const id = `waimai-order-${records.length + 1}`;
+      records.push({ buyOverbearfoodId: id, businessId: body.businessId, overbearfoodId: body.overbearfoodId,
+        serviceId: "service-1", type: "overbear_food", platform: "meituan", status: "buy_signup" });
+      waimaiOrders.set(token, records);
+      return Response.json({ code: 200, data: { buyOverbearId: id, payAmount: 0 } });
+    }
     if (token === "expired-test-token") return Response.json({ code: 401 });
     if (token === "network-failure-token")
       throw new Error("upstream unavailable");
@@ -103,8 +148,24 @@ globalThis.fetch = async (url, init) => {
     if (native && (new URL(String(url)).pathname !== "/rpc" || headers.has("version")))
       return Response.json({ status: { code: 400, msg: "Invalid native gateway" } });
     const body = JSON.parse(String(init.body));
+    const advanceFixture = /^enroll-advance-(available|expired|empty|used|ordinary)-(\d+)-[a-f0-9]+$/.exec(token || "");
+    const advanceOpening = advanceFixture ? Number(advanceFixture[2]) : undefined;
     if (native && !validSignature(headers))
       return Response.json({ status: { code: 400, msg: "Invalid native signature" } });
+    if (rpc === "SilkwormCardService.GetUserCardList") {
+      const expected = { silk_id: 123456789, status: 0, offset: 0, number: 20, card_types: [1], ...(native ? {} : { app_id: 20 }) };
+      if (!advanceFixture || advanceFixture[1] === "ordinary" || headers.get("servername") !== "SilkwormCard" ||
+        headers.get("x-vayne") !== "6789" || JSON.stringify(body) !== JSON.stringify(expected))
+        return Response.json({ status: { code: 400, msg: "Invalid advance card request" } });
+      const reads = (advanceCardReads.get(token) || 0) + 1;
+      advanceCardReads.set(token, reads);
+      const unavailable = advanceFixture[1] === "empty" || consumedAdvanceCoupons.has(token) ||
+        (advanceFixture[1] === "used" && reads > 1);
+      return Response.json({ status: { code: 0 }, list: unavailable ? [] : [{
+        id: 701, expire_time: Math.floor((advanceFixture[1] === "expired" ? Date.now() - 1000 : advanceOpening + 3600_000) / 1000),
+        card: { card_type: 1 },
+      }] });
+    }
     if (rpc === "SilkwormService.GetClientUserInfo") {
       if (native || new URL(String(url)).pathname !== "/rpc" || !validSignature(headers) ||
         headers.get("servername") !== "Silkworm" || headers.get("x-platform") !== "mini" ||
@@ -149,7 +210,7 @@ globalThis.fetch = async (url, init) => {
     if (rpc === "SilkwormService.GrabPromotionQuota") {
       const expected = {
         silk_id: 123456789, promotion_id: body.promotion_id, store_platform: 1,
-        if_advance_order: false, if_pre_order: false, city_code: 450103,
+        if_advance_order: !!advanceFixture && Date.now() < advanceOpening, if_pre_order: false, city_code: 450103,
         longitude: 108.36, latitude: 22.82,
         ...(native ? {} : { app_id: 20 }),
       };
@@ -157,6 +218,11 @@ globalThis.fetch = async (url, init) => {
         headers.get("x-vayne") !== "6789" || ![42, 43].includes(body.promotion_id) ||
         JSON.stringify(body) !== JSON.stringify(expected))
         return Response.json({ status: { code: 400, msg: "Invalid quota request" } });
+      if (body.if_advance_order) {
+        if (advanceFixture[1] !== "available" || consumedAdvanceCoupons.has(token) || Date.now() < advanceOpening - 30 * 60_000)
+          return Response.json({ status: { code: 70, msg: "No available advance coupon" } });
+        consumedAdvanceCoupons.add(token);
+      }
       const key = `${token}:${body.promotion_id}`;
       enrollmentAttempts.set(key, (enrollmentAttempts.get(key) || 0) + 1);
       if (enrollmentAttempts.get(key) > 1 && !cancelledOrders.has(`${token}:${body.promotion_id + 9000}`))
@@ -170,6 +236,17 @@ globalThis.fetch = async (url, init) => {
       return Response.json({ status: { code: 0 }, promotion_order_id: body.promotion_id + 9000 });
     }
     if (rpc === "SilkwormService.GetStorePromotionDetail") {
+      if (advanceFixture) {
+        const expected = { silk_id: 123456789, promotion_id: body.promotion_id, ...(native ? {} : { app_id: 20 }) };
+        if (headers.get("servername") !== "Silkworm" || headers.get("x-vayne") !== "6789" ||
+          ![42, 43].includes(body.promotion_id) || JSON.stringify(body) !== JSON.stringify(expected))
+          return Response.json({ status: { code: 400, msg: "Invalid advance detail request" } });
+        const opening = new Date(advanceOpening + 8 * 3600_000).toISOString();
+        return Response.json({ status: { code: 0 }, promotion_detail: {
+          promotion_id: body.promotion_id, meituan_status: 1,
+          start_time_hour: Number(opening.slice(11, 13)), start_time_minute: Number(opening.slice(14, 16)),
+        } });
+      }
       if (headers.get("servername") !== "Silkworm" || !token ||
         headers.get("x-vayne") !== "6789" || body.silk_id !== 123456789 ||
         JSON.stringify(body) !== JSON.stringify({ silk_id: 123456789, promotion_id: 42, ...(native ? {} : { app_id: 20 }) }))

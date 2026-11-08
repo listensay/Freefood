@@ -1,3 +1,4 @@
+import { defineEventHandler, setHeader } from "h3";
 import { sessionId } from "../../../../utils/session";
 import {
   captureMeituanFrame,

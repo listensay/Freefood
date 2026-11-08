@@ -1,3 +1,4 @@
+import { defineEventHandler, readBody, createError } from "h3";
 import {
   loadSession,
   saveSession,
@@ -12,6 +13,7 @@ import { fetchWaimai } from "../utils/waimai";
 import type { Offer, Provider } from "../../shared/types";
 import { COMPARISON_RADIUS_METERS } from "../../shared/utils/scope";
 import { applyXiaochanEnrollmentUpdates, fetchXiaochanEnrollmentUpdates } from "../utils/xiaochan-enrollment";
+import { applyWaimaiEnrollmentUpdates, fetchWaimaiEnrollmentUpdates } from "../utils/waimai-enrollment";
 
 const syncingSessions = new Map<string, Set<Provider>>();
 
@@ -59,7 +61,8 @@ export default defineEventHandler(async (event) => {
             : provider === "waimai"
               ? await fetchWaimai(snapshot.waimaiAccount!, snapshot.location!, fetch, scope)
               : await fetchMeituan(id, snapshot.location!, scope);
-          const enrollments = provider === "xiaochan" ? await fetchXiaochanEnrollmentUpdates(snapshot, offers) : undefined;
+          const enrollments = provider === "xiaochan" ? await fetchXiaochanEnrollmentUpdates(snapshot, offers)
+            : provider === "waimai" ? await fetchWaimaiEnrollmentUpdates(snapshot, offers) : undefined;
           return { offers, enrollments, updatedAt: new Date().toISOString() };
         } catch (error: any) {
           return { error };
@@ -80,7 +83,8 @@ export default defineEventHandler(async (event) => {
         } else {
           session.offers[provider] = result.offers!;
           if (result.enrollments) {
-            applyXiaochanEnrollmentUpdates(session, snapshot, result.enrollments.updates);
+            if (provider === "waimai") applyWaimaiEnrollmentUpdates(session, snapshot, result.enrollments.updates);
+            else applyXiaochanEnrollmentUpdates(session, snapshot, result.enrollments.updates);
             errors.push(...result.enrollments.errors);
           }
           session.updatedAt[provider] = result.updatedAt;

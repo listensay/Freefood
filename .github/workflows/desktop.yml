@@ -1,0 +1,138 @@
+name: Desktop build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: desktop-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: aarch64
+            node-arch: arm64
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            arch: x86_64
+            node-arch: x64
+            target: x86_64-apple-darwin
+    env:
+      RUSTUP_TOOLCHAIN: "1.89.0"
+      CARGO_TERM_COLOR: always
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.16.0"
+          architecture: ${{ matrix.node-arch }}
+          cache: npm
+      - name: Check release versions
+        id: metadata
+        shell: bash
+        run: |
+          version=$(node scripts/check-desktop-release.mjs)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Install Rust
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            src-tauri/target
+            !src-tauri/target/**/bundle
+            !src-tauri/target/**/bundle/**
+          key: rust-${{ matrix.target }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ matrix.target }}-${{ env.RUSTUP_TOOLCHAIN }}-
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+        timeout-minutes: 10
+      - name: Integration tests
+        if: matrix.arch == 'aarch64'
+        timeout-minutes: 15
+        run: npm run test:integration
+      - name: Prepare native resources
+        run: |
+          npm run build
+          npm run desktop:prepare
+      - name: Native tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib --release --locked --target "$TARGET"
+      - name: Build installers
+        run: npm run desktop:build -- --ci --target "$TARGET" -- --locked
+      - name: Verify and collect installers
+        run: npm run desktop:artifacts -- "$TARGET"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: freefood-macos-${{ matrix.arch }}-${{ steps.metadata.outputs.version }}
+          path: dist/artifacts/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+  release:
+    name: Draft release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: freefood-macos-*
+          path: artifacts
+          merge-multiple: true
+      - name: Verify downloads
+        working-directory: artifacts
+        run: |
+          test "$(find . -maxdepth 1 -name '*.dmg' | wc -l)" -eq 2
+          test "$(find . -maxdepth 1 -name '*.app.zip' | wc -l)" -eq 2
+          test "$(find . -maxdepth 1 -name '*.sha256' | wc -l)" -eq 2
+          sha256sum --check ./*.sha256
+      - name: Create or update draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          if is_draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft'); then
+            if [[ "$is_draft" != true ]]; then
+              echo "Release is already published; refusing to replace its assets."
+              exit 1
+            fi
+            gh release upload "$GITHUB_REF_NAME" artifacts/* --clobber
+          else
+            flags=()
+            version=${GITHUB_REF_NAME#v}
+            if [[ "${version%%+*}" == *-* ]]; then flags+=(--prerelease); fi
+            gh release create "$GITHUB_REF_NAME" artifacts/* \
+              --verify-tag --draft --generate-notes \
+              --title "叠个饭 ${GITHUB_REF_NAME#v}" "${flags[@]}"
+          fi

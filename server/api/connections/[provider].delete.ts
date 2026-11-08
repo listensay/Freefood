@@ -1,3 +1,4 @@
+import { defineEventHandler, createError, getRouterParam } from "h3";
 import { disconnectPlatform } from "../../utils/connections";
 import { assertLocalRequest } from "../../utils/session";
 import { providers, type Provider } from "../../../shared/types";

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { setImmediate } from "node:timers/promises";
 import { decodeXiaochanSession, xiaochanAccountHeaders, xiaochanRequestHeaders, xiaochanRpc } from "../server/utils/xiaochan-rpc";
 import { fetchXiaochan } from "../server/utils/xiaochan";
 
@@ -137,6 +138,7 @@ test("RPC reports confirmed gateway blocks without blaming connectivity or expos
 });
 
 test("Native feed synchronization follows page cursors without sending mini-program fields", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   let page = 0;
   t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
     assert.equal(url, "https://gw.xiaocantech.com/rpc");
@@ -152,13 +154,21 @@ test("Native feed synchronization follows page cursors without sending mini-prog
         order_money: 2000, user_rebate: 1500, left_number: 3, distance: 1000 }],
     });
   });
-  const offers = await fetchXiaochan({ silkId: "123456789", userId: "6789", accessToken: "private" },
+  const pending = fetchXiaochan({ silkId: "123456789", userId: "6789", accessToken: "private" },
     { label: "测试地址", cityCode: 310100, latitude: 31.23, longitude: 121.47 }, { radiusMeters: 7000 });
+  assert.equal(page, 1);
+  await setImmediate();
+  t.mock.timers.tick(5_999);
+  await setImmediate();
+  assert.equal(page, 1);
+  t.mock.timers.tick(1);
+  const offers = await pending;
   assert.equal(page, 2);
   assert.deepEqual(offers.map(offer => offer.id), ["xiaochan:1", "xiaochan:2"]);
 });
 
 test("Mini-program feed sends each returned page cursor while retaining its platform fields", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   let page = 0;
   t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
     assert.equal(url, "https://gw.xiaocantech.com/rpc");
@@ -178,8 +188,19 @@ test("Mini-program feed sends each returned page cursor while retaining its plat
       ],
     });
   });
-  const offers = await fetchXiaochan({ silkId: "123456789", userId: "6789", accessToken: "private", platform: "mini" },
+  const pending = fetchXiaochan({ silkId: "123456789", userId: "6789", accessToken: "private", platform: "mini" },
     { label: "测试地址", cityCode: 310100, latitude: 31.23, longitude: 121.47 }, { radiusMeters: 7000 });
+  assert.equal(page, 1);
+  for (let expectedPage = 1; expectedPage < 3; expectedPage++) {
+    await setImmediate();
+    t.mock.timers.tick(5_999);
+    await setImmediate();
+    assert.equal(page, expectedPage);
+    t.mock.timers.tick(1);
+    await setImmediate();
+    assert.equal(page, expectedPage + 1);
+  }
+  const offers = await pending;
   assert.equal(page, 3);
   assert.deepEqual(offers.map(offer => offer.id), ["xiaochan:1", "xiaochan:2", "xiaochan:3"]);
 });

@@ -1,7 +1,7 @@
 <script setup lang="ts">
+
 import { Link2, ShieldCheck, SlidersHorizontal } from "@lucide/vue";
 
-useHead({ title: "使用指南 · 叠个饭" });
 </script>
 
 <template>

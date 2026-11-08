@@ -1,6 +1,6 @@
 # 叠个饭
 
-小蚕、歪麦霸王餐与美团试吃官同店比价工具，支持活动同步与返现试算。
+小蚕、歪麦霸王餐与美团试吃官同店比价桌面应用，支持活动同步、返现试算与预约报名。
 
 ## 功能特性
 
@@ -14,47 +14,76 @@
 | 同店匹配 | 门店 ID、完整分店名与待核验候选 |
 | 金额展示 | 固定返现、比例返现、评价加返、门槛与独立上限 |
 | 活动管理 | 筛选、排序 |
-| 活动报名 | 小蚕活动报名、取消报名，按活动档位同步状态 |
-| 预约报名 | 自定义时间选择器设置今天的有效报名时间，支持取消任务与服务重启恢复 |
+| 活动报名 | 小蚕与歪麦活动报名、取消报名、预约报名，按活动档位同步状态 |
+| 预约报名 | 设置今天的有效报名时间，小蚕支持使用超前抢单券提前 30 分钟报名，支持取消任务与服务重启恢复 |
 | 页面路由 | 首页 `/`、账号管理 `/accounts`、使用指南 `/guide` |
 | 界面 | 桌面与移动端尺寸适配 |
+| 桌面应用 | Tauri 2 原生窗口、系统托盘，关闭窗口后继续执行预约 |
+| 数据存储 | SQLite 加密快照、系统钥匙串、旧版数据导入 |
 | 局域网调试 | 显式启用、本机与私网访问、同源请求校验 |
 
 ## 技术栈
 
 | 层级 | 技术 |
 | --- | --- |
-| 应用 | Nuxt 4、Vue 3、TypeScript |
-| 服务端 | Nitro、Node.js |
+| 桌面容器 | Tauri 2、Rust、系统 WebView |
+| 前端 | Vue 3、Vue Router、Vite、TypeScript |
+| 本地服务 | H3、内嵌 Node.js 24，通过 Tauri IPC 调用 |
 | 浏览器连接 | Playwright Core、Google Chrome、macOS 钥匙串 |
 | 图标 | Lucide Vue |
-| 会话存储 | AES-256-GCM 加密文件 |
+| 业务数据 | SQLite、WAL 事务、AES-256-GCM 加密快照 |
+| 密钥与偏好 | macOS 钥匙串、WebView localStorage |
 | 开发工具 | tsx、vue-tsc、Prettier |
 
 ## 环境要求
 
-- Node.js 22.16 或更高版本、npm。
-- 账号连接需要 macOS；小蚕与歪麦需要电脑微信 4.1.15。
-- 运行服务的电脑需要安装 Google Chrome，用于美团登录连接与活动同步。
-- 默认通过 `localhost` 或 `127.0.0.1` 访问；局域网调试可显式开启。
+- 桌面应用：macOS 13 或更高版本；安装包已包含 Node.js。
+- 源码开发与构建：Node.js 24.16 或更高版本、npm、Rust 1.89 或更高版本、Xcode Command Line Tools。
+- 小蚕与歪麦账号连接需要电脑微信 4.1.15。
+- 美团登录连接与活动同步需要 Google Chrome。
+- 安装包在目标架构的 Mac 上构建，支持 Apple Silicon 与 Intel 分别构建。
 
 ## 安装与快速开始
+
+安装包可从 [GitHub Releases](https://github.com/listensay/Freefood/releases) 下载，Apple Silicon 选择 `aarch64`，Intel 选择 `x86_64`。
 
 ```bash
 npm install
 npm run dev
 ```
 
-访问 [http://127.0.0.1:3000](http://127.0.0.1:3000)。首次访问允许浏览器定位以自动保存收餐位置，在「账号管理」连接平台后，在「首页」同步活动。已有地址保留不变，可在地址设置中选择「使用当前位置」重新定位。
+启动桌面开发窗口。首次打开允许定位以自动保存收餐位置，在「账号管理」连接平台后，在「首页」同步活动。已有地址保留不变，可在地址设置中选择「使用当前位置」重新定位。
+
+构建桌面安装包：
+
+```bash
+npm run desktop:build
+```
+
+生成的 `.app` 和 `.dmg` 位于 `src-tauri/target/release/bundle/`。桌面应用关闭窗口后继续运行预约，点击系统托盘图标，在菜单中选择「打开主窗口」可恢复窗口，也可点击 Dock 图标重新打开。选择托盘菜单「退出叠个饭」、应用菜单「退出」或按 `Cmd+Q` 完全退出。电脑需保持唤醒与联网，应用完全退出期间不执行预约。
 
 自动定位使用设备当前位置与 BigDataCloud 的客户端逆地理编码接口，无需配置 API 密钥；识别城市、行政区和位置名称，并转换为平台使用的 GCJ-02 经纬度，不识别门牌号。定位不可用时支持手动填写。浏览器定位需要安全上下文：本机 `localhost` 可用，局域网 IP 通常需 HTTPS。
 
-生产运行：
+### GitHub 自动打包
+
+[Desktop build](https://github.com/listensay/Freefood/actions/workflows/desktop.yml) 在 `main` 推送、面向 `main` 的 PR 和手动运行时构建 macOS 双架构安装包。每个架构提供 `.dmg`、保留应用签名与执行权限的 `.app.zip` 和 SHA-256 校验文件，Actions 产物保留 30 天。
+
+发布前统一更新 `package.json`、`package-lock.json`（含根包版本）、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 和 `src-tauri/Cargo.lock` 中的应用版本，再推送对应的 `v<版本号>` 标签，例如 `v0.1.0`。双架构检查与打包成功后生成 Release 草稿；预发布版本自动标记为 Pre-release。重跑可更新草稿附件，不替换已发布版本。
+
+工作流固定使用 Node.js 24.16.0 与 Rust 1.89.0，沿用 ad-hoc 签名，无需额外配置仓库密钥。版本标签必须与应用版本完全一致。
+
+本机构建后运行 `npm run desktop:artifacts`，可在 `dist/artifacts/` 生成相同格式的产物。使用 `--target` 构建时，将相同目标传给收集命令，例如 `npm run desktop:artifacts -- aarch64-apple-darwin`。
+
+### 浏览器运行
+
+浏览器开发使用 `npm run dev:web`，访问 [http://127.0.0.1:1420](http://127.0.0.1:1420)。浏览器生产服务：
 
 ```bash
 npm run build
 npm start
 ```
+
+访问 [http://127.0.0.1:3000](http://127.0.0.1:3000)。
 
 ### 局域网调试
 
@@ -62,15 +91,31 @@ npm start
 npm run dev:lan
 ```
 
-在同一局域网设备访问 `http://<运行电脑的局域网 IP>:3000`。局域网模式绑定 `0.0.0.0`，API 允许本机与私网 IP，保留同源请求校验与浏览器会话隔离。仅在可信局域网启用，不要配置公网端口转发。
+在同一局域网设备访问 `http://<运行电脑的局域网 IP>:1420`。局域网模式绑定 `0.0.0.0`，API 允许本机与私网 IP，保留同源请求校验与浏览器会话隔离。
 
-生产构建可使用 `npm run start:lan`。`npm run dev` 与 `npm start` 仍使用本机模式。Chrome 登录连接需在运行服务的 Mac 上操作。
+生产构建可使用 `npm run start:lan`，默认端口 `3000`。`npm run dev:web` 与 `npm start` 使用本机模式。Chrome 登录连接需在运行服务的 Mac 上操作。
+
+## 数据与旧版迁移
+
+桌面业务数据保存在 `~/Library/Application Support/com.freefood.desktop/food.sqlite3`，账号、活动、报名状态和预约作为加密快照写入 SQLite。密钥保存在系统钥匙串，筛选等界面偏好保存在当前 WebView 的 `localStorage`。浏览器调试数据默认保存在项目的 `.data/food/food.sqlite3`，各浏览器会话仍相互隔离。
+
+旧版数据目录包含 `session.key` 和 `.enc` 文件。在迁移前停止旧服务，再执行：
+
+```bash
+npm run data:migrate
+# 指定旧目录和目标目录
+npm run data:migrate -- /path/to/old-data /path/to/new-data
+```
+
+默认将项目 `.data/food` 导入桌面数据目录。离线迁移不会启动同步或执行报名，导入完成后启动桌面应用使用。导入保留源文件，重复导入不覆盖已存在的数据；原浏览器的界面偏好不迁入 WebView。
+
+数据库备份需保留对应钥匙串密钥，跨机器恢复时需一并迁移密钥。复制数据库前完全退出应用，或使用 SQLite 备份工具；不要只复制运行中的主文件而遗漏 WAL。旧版目录可作为迁移前备份保留。
 
 ## 账号连接
 
 ### 小蚕霸王餐
 
-在运行服务的 Mac 上打开电脑微信，进入小蚕小程序并完成微信登录。使用该电脑浏览器访问项目，在「账号管理」选择「连接电脑微信」。应用读取小蚕小程序的登录会话，经官方身份校验后加密保存。
+在运行应用的 Mac 上打开电脑微信，进入小蚕小程序并完成微信登录。在「账号管理」选择「连接电脑微信」。应用读取小蚕小程序的登录会话，经官方身份校验后加密保存。
 
 当前适配 macOS 微信 4.1.15 的小程序存储格式，只能从运行服务的电脑发起连接。会话失效后，在电脑微信的小蚕小程序重新登录并再次连接；微信存储格式变化时需要更新适配。
 
@@ -92,6 +137,8 @@ npm run dev:lan
 
 歪麦分页同步美团外卖霸王餐活动，包含门槛、普通用户返现、剩余名额、有效时段与评价要求。会员补偿不计入普通用户返现；歪麦内的美团赏金不作为额外霸王餐返现参与叠加。歪麦内部门店 ID 不用于跨平台确认分店。
 
+同步后，可对歪麦普通霸王餐活动报名、取消报名，或预约今天的有效时间自动报名。预约保存在服务端，执行时需保持服务运行。报名或取消结果未确认时，通过「查看报名」或「查看取消」查询；需要支付的订单在歪麦完成支付或取消。
+
 ## 金额展示
 
 收支试算 = 所选霸王餐平台返现 + 美团折算返现 − 订单金额。默认按霸王餐要求金额试算，指定商品同时满足商品价格；结果为正显示「预计收益」，为负显示「预计支出」，为零显示「收支平衡」。
@@ -104,7 +151,7 @@ npm run dev:lan
 
 同店同商品的不同活动档位合并为一张卡片，分别展示订单金额、返现与收支试算。
 
-同步按平台分页继续获取至列表结束，合并重复活动，并保留距收餐位置 7 公里内的数据。分页失败或未完整加载时保留上次成功数据，不将部分结果标记为同步成功。可见列表仍受有效时段、名额、筛选与同店匹配结果影响。
+同步按平台分页继续获取至列表结束，小蚕分页请求间隔 6 秒，合并重复活动，并保留距收餐位置 7 公里内的数据。分页失败或未完整加载时保留上次成功数据，不将部分结果标记为同步成功。可见列表仍受有效时段、名额、筛选与同店匹配结果影响。
 
 小蚕指定商品活动保留商品名称和活动价格，试算同时满足活动门槛与商品价格。
 
@@ -116,27 +163,36 @@ npm run dev:lan
 | --- | --- | --- |
 | `FOOD_CHROME_DATA_DIR` | Chrome 用户数据目录，供自定义安装位置使用 | 当前用户的 macOS Chrome 目录 |
 | `FOOD_BROWSER_PATH` | Chrome 可执行文件路径 | 使用已安装的 Google Chrome |
-| `FOOD_DATA_DIR` | 加密会话文件目录 | `.data/food` |
+| `FOOD_DATA_DIR` | SQLite 数据目录 | 桌面为系统应用数据目录；浏览器为 `.data/food` |
+| `FOOD_LEGACY_DATA_DIR` | 启动时额外导入的旧数据目录 | 不设置 |
+| `FOOD_SESSION_KEY` | 无钥匙串部署或测试使用的 64 位十六进制密钥 | 不设置，使用 macOS 钥匙串 |
 | `FOOD_ALLOW_LAN` | 值为 `1` 时允许局域网 API 请求 | `0` |
 | `FOOD_WECHAT_DATA_DIR` | 电脑微信小程序 `radium/users` 目录，供自定义安装位置使用 | 当前用户的 macOS 微信目录 |
 
-生产入口从启动环境读取变量，不自动加载 `.env`。会话目录内的密钥和加密文件需共同备份。
+服务从启动环境读取变量，不自动加载 `.env`。桌面应用强制使用本机服务与独立调用令牌，不启用局域网 API。
 
 ## 开发命令
 
 | 命令 | 用途 |
 | --- | --- |
-| `npm run dev` | 开发服务 |
+| `npm run dev` | Tauri 桌面开发窗口 |
+| `npm run dev:web` | 浏览器开发服务 |
 | `npm run dev:lan` | 局域网开发服务 |
-| `npm run build` | 生产构建 |
+| `npm run build` | 前端与本地服务生产构建 |
+| `npm run desktop:build` | 构建桌面应用与安装包 |
+| `npm run desktop:artifacts` | 校验桌面产物并生成分发包与校验文件 |
+| `npm run data:migrate` | 离线导入旧版数据 |
 | `npm start` | 生产服务 |
 | `npm run start:lan` | 局域网生产服务 |
 | `npm test` | 计算规则与数据适配器测试 |
 | `npm run test:integration` | API 与开发服务集成测试 |
 | `npm run typecheck` | 类型检查 |
+| `cargo test --manifest-path src-tauri/Cargo.toml` | 原生调用边界测试 |
 | `npm run format` | 源码格式化 |
 
 ## 相关入口
 
 - [小蚕参考项目](https://github.com/lyrric/xiaochan)
-- [Nuxt 文档](https://nuxt.com/docs)
+- [Tauri 文档](https://v2.tauri.app/)
+- [Vue 文档](https://cn.vuejs.org/)
+- [Vite 文档](https://vite.dev/)

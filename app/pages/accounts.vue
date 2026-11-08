@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ArrowLeft, ArrowRight, Link2, LogOut } from "@lucide/vue";
+import { useFoodApp } from "../composables/useFoodApp";
+import AccountProfile from "../components/AccountProfile.vue";
+import { ArrowRight, Link2, LogOut } from "@lucide/vue";
 import { MEITUAN_ACTIVITY_URL } from "#shared/meituan";
 
 const {
   data, loaded, busy, connectComputerWeChat, connectMeituanBrowser, disconnect,
 } = useFoodApp();
-useHead({ title: "账号管理 · 叠个饭" });
 </script>
 
 <template>
@@ -14,9 +15,6 @@ useHead({ title: "账号管理 · 叠个饭" });
       <div>
         <h1>账号管理</h1>
       </div>
-      <NuxtLink class="button secondary" to="/">
-        <ArrowLeft :size="16" />返回首页
-      </NuxtLink>
     </section>
     <div class="account-grid">
       <section class="account-panel">

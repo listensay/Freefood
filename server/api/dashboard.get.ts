@@ -1,3 +1,4 @@
+import { defineEventHandler } from "h3";
 import { loadSession, publicSession, sessionId } from "../utils/session";
 
 export default defineEventHandler(async (event) =>

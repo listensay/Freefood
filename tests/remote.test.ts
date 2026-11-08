@@ -1,3 +1,4 @@
+import "./fixtures/session-key";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -16,7 +17,7 @@ const server = spawn(
   [
     "--import",
     join(process.cwd(), "tests/fixtures/meituan-browser.mjs"),
-    ".output/server/index.mjs",
+    "dist/service/index.mjs",
   ],
   {
     env: {
@@ -282,7 +283,7 @@ try {
     assert.equal(result.connections.meituan.label, "138****0000");
     assert.ok(!text.includes("private-chrome-canary"));
     assert.ok(!text.includes("private-foreign-canary"));
-    for (const name of (await readdir(directory)).filter(name => name.endsWith(".enc")))
+    for (const name of (await readdir(directory)).filter(name => /^food\.sqlite3(?:-wal|-shm)?$/.test(name)))
       assert.ok(!(await readFile(join(directory, name))).includes(Buffer.from("private-chrome-canary")));
     await call("/api/import", imported, undefined, { provider: "meituan", offers: [{ id: "keep", name: "已保存门店", rule: { kind: "fixed", thresholdCents: 2500, cashbackCents: 500 } }] });
     const reconnected = await call("/api/connections/meituan/browser", imported, undefined, {});
@@ -320,7 +321,7 @@ try {
     assert.equal(result.connections.meituan.state, "connected");
     assert.equal(result.connections.meituan.label, "138****0000");
     assert.ok(!text.includes("private-activity"));
-    for (const name of (await readdir(directory)).filter(name => name.endsWith(".enc")))
+    for (const name of (await readdir(directory)).filter(name => /^food\.sqlite3(?:-wal|-shm)?$/.test(name)))
       assert.ok(!(await readFile(join(directory, name))).includes(Buffer.from("private-activity")));
     await call("/api/import", imported, undefined, { provider: "meituan", offers: [{ id: "keep-activity", name: "已保存门店", rule: { kind: "fixed", thresholdCents: 2500, cashbackCents: 500 } }] });
     const reconnected = await call("/api/connections/meituan/browser", imported, undefined, {});

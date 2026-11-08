@@ -10,7 +10,8 @@ const minutes = (value: string) => {
 };
 
 export function todayEnrollmentWindow(offer: Offer, now = new Date()): { start: number; end: number } | undefined {
-  if (offer.provider !== "xiaochan" || offer.source !== "live" ||
+  if ((offer.provider !== "xiaochan" && offer.provider !== "waimai") || offer.source !== "live" ||
+    (offer.provider === "waimai" && offer.enrollmentAvailable !== true) ||
     !Number.isSafeInteger(offer.inventory) || (offer.inventory ?? 0) <= 0) return;
   const day = shanghaiDateTime(now).slice(0, 10);
   const collected = Date.parse(offer.collectedAt);

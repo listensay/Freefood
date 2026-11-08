@@ -1,3 +1,4 @@
+import "./fixtures/session-key";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -13,7 +14,7 @@ const port = 30000 + Math.floor(Math.random() * 9000);
 const base = `http://127.0.0.1:${port}`;
 const host = `192.168.1.20:${port}`;
 const origin = `http://${host}`;
-const server = spawn(process.execPath, [".output/server/index.mjs"], {
+const server = spawn(process.execPath, ["dist/service/index.mjs"], {
   env: {
     ...process.env,
     HOST: "0.0.0.0",

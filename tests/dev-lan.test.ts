@@ -1,3 +1,4 @@
+import "./fixtures/session-key";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -8,34 +9,28 @@ import { once } from "node:events";
 import { requestWithHost } from "./fixtures/http";
 
 for (const lan of [false, true]) {
-  await test(`Nuxt dev ${lan ? "LAN" : "local"} gateway enforces access before Unix-socket forwarding`, async () => {
+  await test(`Vite dev ${lan ? "LAN" : "local"} gateway enforces access before API proxying`, async () => {
     const directory = await mkdtemp(join(tmpdir(), "food-dev-lan-"));
     const project = join(directory, "project");
     await mkdir(project);
     // Keep generated files and the dev lock separate from the user's running service.
-    for (const name of ["app", "server", "shared", "public", "node_modules"])
+    for (const name of ["app", "server", "shared", "public", "node_modules", "scripts"])
       await symlink(join(process.cwd(), name), join(project, name), "dir");
-    for (const name of ["nuxt.config.ts", "package.json"])
+    for (const name of ["vite.config.ts", "package.json", "index.html", "tsconfig.json"])
       await copyFile(join(process.cwd(), name), join(project, name));
     const port = 40000 + Math.floor(Math.random() * 9000);
     const base = `http://127.0.0.1:${port}`;
     const host = `192.168.1.20:${port}`;
     const server = spawn(
       process.execPath,
-      [
-        "node_modules/@nuxt/cli/bin/nuxi.mjs",
-        "dev",
-        "--host",
-        lan ? "0.0.0.0" : "127.0.0.1",
-        "--port",
-        String(port),
-      ],
+      ["scripts/dev.mjs"],
       {
         cwd: project,
         env: {
           ...process.env,
           FOOD_ALLOW_LAN: lan ? "1" : "0",
           FOOD_DATA_DIR: directory,
+          PORT: String(port),
         },
         stdio: "pipe",
       },
@@ -62,12 +57,13 @@ for (const lan of [false, true]) {
         headers: { host },
       });
       assert.equal(response.status, lan ? 200 : 403);
-      if (lan) {
+      {
+        const mutationHost = lan ? host : `127.0.0.1:${port}`;
         const invalidImport = await requestWithHost(base + "/api/import", {
           method: "POST",
           headers: {
-            host,
-            origin: `http://${host}`,
+            host: mutationHost,
+            origin: `http://${mutationHost}`,
             "x-food-request": "1",
             "content-type": "application/json",
           },

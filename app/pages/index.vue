@@ -1,4 +1,9 @@
 <script setup lang="ts">
+import { computed } from "vue";
+import { useFoodApp } from "../composables/useFoodApp";
+import StoreCard from "../components/StoreCard.vue";
+import StoreGrid from "../components/StoreGrid.vue";
+import UiSelect from "../components/UiSelect.vue";
 import { RefreshCw, Search, SlidersHorizontal } from "@lucide/vue";
 import type { StoreMatch } from "#shared/types";
 import { groupStoreMatches, matchStores } from "#shared/utils/matching";
@@ -7,7 +12,6 @@ import { COMPARISON_RADIUS_METERS, matchWithinRadius } from "#shared/utils/scope
 
 const { loaded, data, busy, enrollingOfferIds, syncing, filter, sort, bawangcanProvider, sync, changeCombination, cancelSchedule } = useFoodApp();
 const scheduledTime = (value: string) => new Date(value).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
-useHead({ title: "叠个饭 · 霸王餐与试吃官同店比价" });
 
 const matches = computed(() =>
   matchStores(

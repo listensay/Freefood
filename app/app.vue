@@ -1,4 +1,8 @@
 <script setup lang="ts">
+import { RouterLink, RouterView } from "vue-router";
+import { provideFoodApp } from "./composables/useFoodApp";
+import EnrollmentScheduleDialog from "./components/EnrollmentScheduleDialog.vue";
+import RouteAnnouncer from "./components/RouteAnnouncer.vue";
 import { BookOpen, Check, ChevronDown, CircleHelp, Link2, MapPin, Settings2, X } from "@lucide/vue";
 
 const {
@@ -9,11 +13,11 @@ const {
 </script>
 
 <template>
-  <NuxtRouteAnnouncer />
+  <RouteAnnouncer />
   <div class="app-shell">
     <header class="site-header">
       <div class="header-inner">
-        <NuxtLink
+        <RouterLink
           to="/"
           class="brand"
           aria-label="叠个饭首页"
@@ -21,15 +25,15 @@ const {
         >
           <img class="brand-mark" src="/icon-512.png" width="42" height="42" alt="" />
           <span>叠个饭</span>
-        </NuxtLink>
+        </RouterLink>
         <nav class="main-nav" aria-label="主导航">
-          <NuxtLink to="/" exact-active-class="active" @click="filter = 'all'">
-            <Link2 :size="20" />首页</NuxtLink
-          ><NuxtLink to="/accounts" exact-active-class="active" @click="filter = 'all'">
-            <Settings2 :size="19" />账号管理</NuxtLink
-          ><NuxtLink to="/guide" exact-active-class="active" @click="filter = 'all'">
+          <RouterLink to="/" exact-active-class="active" @click="filter = 'all'">
+            <Link2 :size="20" />首页</RouterLink
+          ><RouterLink to="/accounts" exact-active-class="active" @click="filter = 'all'">
+            <Settings2 :size="19" />账号管理</RouterLink
+          ><RouterLink to="/guide" exact-active-class="active" @click="filter = 'all'">
             <BookOpen :size="19" />使用指南
-          </NuxtLink>
+          </RouterLink>
         </nav>
         <div class="topbar-actions">
           <button class="location-button" :disabled="busy === 'locate'" @click="openLocation">
@@ -57,7 +61,11 @@ const {
             <X :size="16" />
           </button>
         </div>
-        <NuxtPage />
+        <RouterView v-slot="{ Component, route }">
+          <Transition name="page" mode="out-in">
+            <component :is="Component" :key="route.path" />
+          </Transition>
+        </RouterView>
       </main>
     </div>
   </div>

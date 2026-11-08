@@ -1,3 +1,5 @@
+import { sessionTestKey } from "./fixtures/session-key";
+import { storedPayload, storedSnapshot } from "./fixtures/session-database";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -10,10 +12,11 @@ import { crc32 } from "node:zlib";
 import { requestWithHost } from "./fixtures/http";
 
 const directory = await mkdtemp(join(tmpdir(), "food-api-"));
+await writeFile(join(directory, "session.key"), sessionTestKey);
 const wechatDirectory = await mkdtemp(join(tmpdir(), "food-api-wechat-"));
 const port = 19000 + Math.floor(Math.random() * 10000);
 const base = `http://127.0.0.1:${port}`;
-const server = spawn(process.execPath, ["--import", join(process.cwd(), "tests/fixtures/waimai-upstream.mjs"), ".output/server/index.mjs"], {
+const server = spawn(process.execPath, ["--import", join(process.cwd(), "tests/fixtures/waimai-upstream.mjs"), "dist/service/index.mjs"], {
   env: {
     ...process.env,
     HOST: "127.0.0.1",
@@ -143,9 +146,14 @@ try {
     assert.deepEqual(data.offers, { xiaochan: [], waimai: [], meituan: [] });
   });
   await test("homepage keeps synchronization without the activity availability switch", async () => {
-    const html = await (await fetch(base)).text();
-    assert.match(html, /同步活动/);
-    assert.doesNotMatch(html, /仅看有效活动|role="switch"/);
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ channel: "chrome", headless: true });
+    try {
+      const page = await browser.newPage(); await page.goto(base);
+      await page.locator(".sync-button").waitFor();
+      assert.match(await page.locator(".sync-button").innerText(), /同步活动/);
+      assert.equal(await page.getByText("仅看有效活动", { exact: true }).count(), 0);
+    } finally { await browser.close(); }
   });
   for (const [path, title, content] of [
     ["/", "叠个饭 · 霸王餐与试吃官同店比价", /7 公里内匹配活动/],
@@ -155,18 +163,19 @@ try {
     await test(`${path} renders its page and active navigation on direct access`, async () => {
       const response = await fetch(base + path);
       assert.equal(response.status, 200);
-      const html = await response.text();
-      assert.ok(html.includes(`<title>${title}</title>`));
-      assert.match(html, content);
-      const nav = html.match(/<nav\b[^>]*aria-label="主导航"[^>]*>([\s\S]*?)<\/nav>/)?.[1];
-      assert.ok(nav, "Main navigation is missing");
-      for (const target of ["/", "/accounts", "/guide"])
-        assert.ok(nav.includes(`href="${target}"`));
-      const activeLinks = [...nav.matchAll(/<a\b[^>]*aria-current="page"[^>]*>/g)];
-      assert.equal(activeLinks.length, 1);
-      assert.ok(activeLinks[0]![0].includes(`href="${path}"`));
-      if (path === "/accounts")
-        assert.doesNotMatch(html, /活动导入|同步活动|type="file"|xiaochan-phone|xiaochan-password|手机号登录|小程序会话导入|启用访客访问|waimai-token|打开登录页面|浏览器登录|meituan-session|请求头 JSON/);
+      const { chromium } = await import("playwright-core");
+      const browser = await chromium.launch({ channel: "chrome", headless: true });
+      try {
+        const page = await browser.newPage(); await page.goto(base + path);
+        await page.locator("nav[aria-label='主导航']").waitFor();
+        assert.equal(await page.title(), title);
+        assert.match(await page.locator("body").innerText(), content);
+        const nav = page.getByRole("navigation", { name: "主导航" });
+        for (const target of ["/", "/accounts", "/guide"]) assert.equal(await nav.locator(`a[href="${target}"]`).count(), 1);
+        assert.equal(await nav.locator("a[aria-current='page']").count(), 1);
+        assert.equal(await nav.locator("a[aria-current='page']").getAttribute("href"), path);
+        if (path === "/accounts") assert.doesNotMatch(await page.locator("main").innerHTML(), /活动导入|同步活动|type="file"|xiaochan-phone|xiaochan-password|手机号登录|小程序会话导入|启用访客访问|waimai-token|打开登录页面|浏览器登录|meituan-session|请求头 JSON/);
+      } finally { await browser.close(); }
     });
   }
   await test("unknown page routes return 404", async () => {
@@ -215,7 +224,7 @@ try {
     assert.equal(data.connections.xiaochan.state, "connected");
     assert.equal(data.connections.xiaochan.profile.userId, "6789");
     assert.equal(data.xiaochanAccount, undefined);
-    for (const name of (await readdir(directory)).filter(name => name.endsWith(".enc")))
+    for (const name of (await readdir(directory)).filter(name => /\.enc$|^food\.sqlite3(?:-wal|-shm)?$/.test(name)))
       assert.ok(!(await readFile(join(directory, name))).includes(Buffer.from("corrected-xiaochan-test-session")));
   });
   await test("Computer WeChat connection requires no supplied credentials and does not read caller paths", async () => {
@@ -248,12 +257,9 @@ try {
       assert.ok(!text.includes(secret));
     assert.equal(data.xiaochanAccount, undefined);
     const id = c.split("=")[1]!;
-    const encrypted = await readFile(join(directory, id + ".enc"));
+    const encrypted = storedPayload(directory, id);
     assert.ok(!encrypted.includes(Buffer.from("wechat-test-success")));
-    const key = await readFile(join(directory, "session.key"));
-    const decipher = createDecipheriv("aes-256-gcm", key, encrypted.subarray(0, 12));
-    decipher.setAuthTag(encrypted.subarray(12, 28));
-    const local = JSON.parse(Buffer.concat([decipher.update(encrypted.subarray(28)), decipher.final()]).toString());
+    const local = storedSnapshot(directory, id);
     assert.equal(local.xiaochanAccount.platform, "mini");
     assert.equal(local.xiaochanHeaders, undefined);
     const otherBrowser = await (await fetch(base + "/api/dashboard", { headers: { cookie: cookie2 } })).json();
@@ -316,7 +322,7 @@ try {
     assert.equal(data.waimaiAccount, undefined);
     for (const secret of ["wechat-waimai-test-success", "private-waimai-profile-field"])
       assert.ok(!text.includes(secret));
-    for (const name of (await readdir(directory)).filter(name => name.endsWith(".enc")))
+    for (const name of (await readdir(directory)).filter(name => /\.enc$|^food\.sqlite3(?:-wal|-shm)?$/.test(name)))
       assert.ok(!(await readFile(join(directory, name))).includes(Buffer.from("wechat-waimai-test-success")));
     const isolated = await (await fetch(base + "/api/dashboard", { headers: { cookie: cookie2 } })).json();
     assert.equal(isolated.connections.waimai.state, "disconnected");
@@ -411,10 +417,7 @@ try {
     assert.equal(data.offers.xiaochan.length, 1);
     assert.equal(data.offers.xiaochan[0].source, "import");
     assert.equal(data.offers.meituan.length, 1);
-    const saved = await readFile(path);
-    const decipher = createDecipheriv("aes-256-gcm", key, saved.subarray(0, 12));
-    decipher.setAuthTag(saved.subarray(12, 28));
-    const plaintext = Buffer.concat([decipher.update(saved.subarray(28)), decipher.final()]).toString();
+    const plaintext = JSON.stringify(storedSnapshot(directory, id));
     assert.ok(!plaintext.includes("obsolete-activity"));
   });
   await test("location change clears all previous-location offers but keeps connections", async () => {
@@ -475,10 +478,12 @@ try {
     snapshot.connections.waimai = { state: "connected", label: "已登录" };
     snapshot.location = { label: "南宁", cityName: "南宁市", cityCode: 450103, latitude: 22.82, longitude: 108.36 };
     const c = await seedSession(snapshot);
+    // Finish the legacy-profile import before racing sync and polling, as the UI does.
+    await fetch(base + "/api/dashboard", { headers: { cookie: c } });
     let finished = false;
     const syncing = call("/api/sync", {}, "POST", c).then(response => { finished = true; return response.json(); });
     let data: any;
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 80; i++) {
       data = await (await fetch(base + "/api/dashboard", { headers: { cookie: c } })).json();
       if (data.offers.waimai.length) break;
       await new Promise(resolve => setTimeout(resolve, 25));
@@ -616,7 +621,7 @@ try {
           assert.equal(syncs, 1);
         };
         await navigate("账号管理", "/accounts");
-        await navigate("返回首页", "/");
+        await navigate("首页", "/");
         await navigate("使用指南", "/guide");
         await navigate("首页", "/");
         await page.goBack();
@@ -684,7 +689,7 @@ try {
       await page.locator(".account-panel").filter({ has: page.getByRole("heading", { name: "歪麦霸王餐", exact: true }) })
         .getByRole("button", { name: "连接电脑微信", exact: true }).click();
       await page.getByRole("alert").getByText("歪麦连接失败", { exact: true }).waitFor();
-      await page.getByRole("link", { name: "返回首页", exact: true }).click();
+      await page.getByRole("link", { name: "首页", exact: true }).click();
       await page.locator(".sync-button").waitFor();
       await page.clock.runFor(100);
       assert.equal(syncs, 2);
@@ -764,6 +769,61 @@ try {
         assert.deepEqual(result.errors, ["请在电脑微信的歪麦小程序中完成验证后重试"]);
     });
   }
+  await test("Waimai enrollment APIs serialize duplicate clicks and cancel only the selected official order", async () => {
+    const c = await seededWaimai(await freshCookie(), "wechat-waimai-test-enrollment-api");
+    await call("/api/location", { label: "收餐地址", cityName: "上海市", cityCode: 310000, latitude: 31.23, longitude: 121.47 }, "POST", c);
+    const synced = await (await call("/api/sync", { provider: "waimai" }, "POST", c)).json();
+    assert.deepEqual(synced.errors, []);
+    const offerId = "waimai:api-store:api-sku";
+    assert.equal(synced.data.offers.waimai[0].enrollmentAvailable, true);
+    for (const response of await Promise.all([1, 2].map(() => call("/api/waimai/enroll", { offerId }, "POST", c)))) {
+      assert.equal(response.status, 200);
+      const data = await response.json();
+      assert.deepEqual(data.offers.waimai[0].enrollment, { state: "enrolled", orderId: "waimai-order-1" });
+      assert.equal(data.waimaiAccount, undefined);
+      assert.equal(data.waimaiEnrollments, undefined);
+    }
+    assert.equal((await call("/api/waimai/cancel", { offerId: "waimai:api-store:wrong-tier" }, "POST", c)).status, 409);
+    const cancelled = await call("/api/waimai/cancel", { offerId }, "POST", c);
+    assert.equal(cancelled.status, 200);
+    assert.equal((await cancelled.json()).offers.waimai[0].enrollment, undefined);
+    const again = await call("/api/waimai/enroll", { offerId }, "POST", c);
+    assert.equal(again.status, 200);
+    assert.equal((await again.json()).offers.waimai[0].enrollment.orderId, "waimai-order-2");
+  });
+  await test("Waimai scheduled enrollment runs on the server and cancelled schedules never submit", async () => {
+    const token = "wechat-waimai-test-schedule-api";
+    const c = await seededWaimai(await freshCookie(), token);
+    await call("/api/location", { label: "收餐地址", cityName: "上海市", cityCode: 310000, latitude: 31.23, longitude: 121.47 }, "POST", c);
+    const synced = await (await call("/api/sync", { provider: "waimai" }, "POST", c)).json();
+    const snapshot = synced.data;
+    snapshot.waimaiAccount = { userId: waimaiUserId, uid: waimaiUid, token };
+    snapshot.offers.waimai.push({ ...snapshot.offers.waimai[0], id: "waimai:api-store:api-sku-2" });
+    const scheduledCookie = await seedSession(snapshot), offerId = "waimai:api-store:api-sku";
+    const runAt = new Date(Date.now() + 1500).toISOString();
+    for (const id of [offerId, "waimai:api-store:api-sku-2"])
+      assert.equal((await call("/api/waimai/schedule", { offerId: id, runAt }, "POST", scheduledCookie)).status, 200);
+    assert.equal((await call("/api/waimai/schedule", { offerId: "waimai:api-store:api-sku-2" }, "DELETE", scheduledCookie)).status, 200);
+    let result: any;
+    for (let i = 0; i < 100; i++) {
+      result = await (await fetch(base + "/api/dashboard", { headers: { cookie: scheduledCookie } })).json();
+      if (result.offers.waimai[0].enrollment?.state === "enrolled") break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.equal(result.offers.waimai[0].enrollment?.state, "enrolled");
+    assert.equal(result.offers.waimai[1].enrollment, undefined);
+    assert.deepEqual(result.enrollmentSchedules, []);
+    assert.equal(result.waimaiSchedules, undefined);
+  });
+  await test("Waimai mutation APIs enforce session and same-origin request guards", async () => {
+    const c = await freshCookie();
+    for (const action of ["enroll", "cancel", "schedule"]) {
+      const path = `/api/waimai/${action}`;
+      assert.equal((await call(path, { offerId: "waimai:shop:sku" }, "POST", c)).status, 401);
+      assert.equal((await call(path, { offerId: "waimai:shop:sku" }, "POST", c, { origin: "https://evil.example" })).status, 403);
+    }
+    assert.equal((await call("/api/waimai/schedule", { offerId: "waimai:shop:sku" }, "DELETE", c, { origin: "https://evil.example" })).status, 403);
+  });
   await test("disconnecting Waimai clears only its credentials and activities", async () => {
     const response = await call("/api/connections/waimai", undefined, "DELETE");
     assert.equal(response.status, 200);
@@ -905,6 +965,28 @@ try {
     assert.ok(synced.data.offers.xiaochan.some((offer: any) => offer.id === "xiaochan:42"));
     return c;
   };
+  const advanceOpeningTime = (minutes = 20) => {
+    const now = Date.now();
+    const today = new Date(now + 8 * 3600_000).toISOString().slice(0, 10);
+    const dayEnd = Date.parse(`${today}T00:00:00+08:00`) + 86400_000;
+    return Math.min(Math.ceil((now + minutes * 60_000) / 60_000) * 60_000, dayEnd - 60_000);
+  };
+  const advanceEnrollmentSession = async (mode: string, opening: number) => {
+    const snapshot = await (await fetch(base + "/api/dashboard", { headers: { cookie: await freshCookie() } })).json();
+    snapshot.location = { label: "南宁", cityCode: 450103, latitude: 22.82, longitude: 108.36 };
+    snapshot.xiaochanAccount = {
+      silkId: "123456789", userId: "6789", accessToken: `enroll-advance-${mode}-${opening}-${randomBytes(4).toString("hex")}`,
+    };
+    snapshot.connections.xiaochan = { state: "connected", label: "已登录", profile: { userId: "6789" } };
+    snapshot.offers.xiaochan = [42, 43].map(id => ({
+      id: `xiaochan:${id}`, provider: "xiaochan", name: "超前预约测试店", category: "美食", source: "live",
+      collectedAt: new Date().toISOString(), inventory: 3, distanceMeters: 1200,
+      startTime: new Date(opening + 8 * 3600_000).toISOString().slice(11, 16), endTime: "24:00",
+      validFrom: new Date(opening).toISOString(), requirement: "无需评价",
+      rule: { kind: "fixed", thresholdCents: 2000, cashbackCents: 1500 },
+    }));
+    return seedSession(snapshot);
+  };
   await test("Enrollment rejects anonymous, cross-site and missing-header requests", async () => {
     const c = await freshCookie();
     assert.equal((await call("/api/xiaochan/enroll", { offerId: "xiaochan:42" }, "POST", c)).status, 401);
@@ -976,7 +1058,7 @@ try {
   }
   await test("Cancellation and scheduling validate sessions and reject cross-origin requests", async () => {
     const c = await freshCookie();
-    for (const path of ["/api/xiaochan/cancel", "/api/xiaochan/schedule"]) {
+    for (const path of ["/api/xiaochan/cancel", "/api/xiaochan/schedule", "/api/xiaochan/schedule-options"]) {
       assert.equal((await call(path, { offerId: "xiaochan:42", runAt: new Date(Date.now() + 60_000).toISOString() }, "POST", c)).status, 401);
       assert.equal((await call(path, { offerId: "xiaochan:42" }, "POST", c, { origin: "https://evil.example" })).status, 403);
     }
@@ -1019,6 +1101,98 @@ try {
     const result = await (await fetch(base + "/api/dashboard", { headers: { cookie: checkedCookie } })).json();
     assert.deepEqual(result.enrollmentSchedules, []);
   });
+  await test("Xiaochan advance options expose verified time windows without card details or client-supplied eligibility", async t => {
+    const opening = advanceOpeningTime(40);
+    if (opening - Date.now() < 31 * 60_000) return t.skip("No later opening available before today's boundary");
+    const c = await advanceEnrollmentSession("available", opening);
+    const response = await call("/api/xiaochan/schedule-options", { offerId: "xiaochan:42" }, "POST", c);
+    assert.equal(response.status, 200);
+    const options = await response.json();
+    assert.deepEqual(options, { offerId: "xiaochan:42", advanceWindows: [{ start: opening - 30 * 60_000, end: opening }] });
+    assert.equal(JSON.stringify(options).includes("private"), false);
+    assert.equal((await call("/api/xiaochan/schedule-options", { offerId: "waimai:42:43" }, "POST", c)).status, 400);
+    assert.equal((await call("/api/xiaochan/schedule-options", { offerId: "xiaochan:99" }, "POST", c)).status, 404);
+    const tooEarly = new Date(opening - 30 * 60_000 - 1000).toISOString();
+    assert.equal((await call("/api/xiaochan/schedule", { offerId: "xiaochan:42", runAt: tooEarly,
+      advanceOrder: true, advanceWindows: [{ start: 0, end: opening }] }, "POST", c)).status, 400);
+    assert.equal((await call("/api/xiaochan/schedule", { offerId: "xiaochan:42", runAt: new Date(opening - 30 * 60_000).toISOString() }, "POST", c)).status, 200);
+    assert.equal((await call("/api/xiaochan/schedule", { offerId: "xiaochan:42" }, "DELETE", c)).status, 200);
+  });
+  for (const mode of ["empty", "expired"]) {
+    await test(`Xiaochan advance ${mode} coupons do not authorize early schedules`, async t => {
+      const opening = advanceOpeningTime();
+      if (opening - Date.now() < 10_000) return t.skip("Today's opening boundary has passed");
+      const c = await advanceEnrollmentSession(mode, opening);
+      const response = await call("/api/xiaochan/schedule-options", { offerId: "xiaochan:42" }, "POST", c);
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), { offerId: "xiaochan:42", advanceWindows: [] });
+      assert.equal((await call("/api/xiaochan/schedule", { offerId: "xiaochan:42", runAt: new Date(Date.now() + 1000).toISOString(),
+        advanceOrder: true }, "POST", c)).status, 409);
+      const result = await (await fetch(base + "/api/dashboard", { headers: { cookie: c } })).json();
+      assert.deepEqual(result.enrollmentSchedules, []);
+      assert.equal(result.offers.xiaochan[0].enrollment, undefined);
+    });
+  }
+  await test("Xiaochan advance reservations share account capacity across browser sessions and release it on cancellation", async t => {
+    const opening = advanceOpeningTime();
+    if (opening - Date.now() < 60_000) return t.skip("Today's opening boundary has passed");
+    const first = await advanceEnrollmentSession("available", opening), second = await advanceEnrollmentSession("available", opening);
+    const runAt = new Date(Date.now() + 30_000).toISOString();
+    try {
+      assert.equal((await call("/api/xiaochan/schedule", { offerId: "xiaochan:42", runAt }, "POST", first)).status, 200);
+      assert.equal((await call("/api/xiaochan/schedule", { offerId: "xiaochan:42", runAt }, "POST", second)).status, 409);
+      assert.equal((await call("/api/xiaochan/schedule", { offerId: "xiaochan:42" }, "DELETE", first)).status, 200);
+      assert.equal((await call("/api/xiaochan/schedule", { offerId: "xiaochan:42", runAt }, "POST", second)).status, 200);
+    } finally {
+      await call("/api/xiaochan/schedule", { offerId: "xiaochan:42" }, "DELETE", first);
+      await call("/api/xiaochan/schedule", { offerId: "xiaochan:42" }, "DELETE", second);
+    }
+  });
+  await test("Xiaochan advance scheduled execution actually spends a coupon and never reuses it for another tier", async t => {
+    const opening = advanceOpeningTime();
+    if (opening - Date.now() < 10_000) return t.skip("Today's opening boundary has passed");
+    const c = await advanceEnrollmentSession("available", opening);
+    const response = await call("/api/xiaochan/schedule", { offerId: "xiaochan:42", runAt: new Date(Date.now() + 1500).toISOString() }, "POST", c);
+    assert.equal(response.status, 200);
+    const created = await response.json();
+    assert.equal(created.enrollmentSchedules[0].advanceOrder, undefined);
+    let result: any;
+    for (let i = 0; i < 100; i++) {
+      result = await (await fetch(base + "/api/dashboard", { headers: { cookie: c } })).json();
+      if (result.offers.xiaochan[0].enrollment?.state === "enrolled" || result.enrollmentSchedules[0]?.state === "failed") break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.deepEqual(result.offers.xiaochan[0].enrollment, { state: "enrolled", orderId: "9042" });
+    assert.deepEqual(result.enrollmentSchedules, []);
+    const options = await call("/api/xiaochan/schedule-options", { offerId: "xiaochan:43" }, "POST", c);
+    assert.equal(options.status, 200);
+    assert.deepEqual((await options.json()).advanceWindows, []);
+    assert.equal((await call("/api/xiaochan/schedule", { offerId: "xiaochan:43", runAt: new Date(Date.now() + 1000).toISOString() }, "POST", c)).status, 409);
+  });
+  await test("Xiaochan advance coupons used before execution fail the task without submitting a quota request", async t => {
+    const opening = advanceOpeningTime();
+    if (opening - Date.now() < 10_000) return t.skip("Today's opening boundary has passed");
+    const c = await advanceEnrollmentSession("used", opening);
+    assert.equal((await call("/api/xiaochan/schedule", { offerId: "xiaochan:42", runAt: new Date(Date.now() + 1500).toISOString() }, "POST", c)).status, 200);
+    let result: any;
+    for (let i = 0; i < 100; i++) {
+      result = await (await fetch(base + "/api/dashboard", { headers: { cookie: c } })).json();
+      if (result.enrollmentSchedules[0]?.state === "failed") break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.equal(result.enrollmentSchedules[0].state, "failed");
+    assert.equal(result.offers.xiaochan[0].enrollment, undefined);
+    assert.equal((await call("/api/xiaochan/schedule", { offerId: "xiaochan:42" }, "DELETE", c)).status, 200);
+  });
+  await test("Xiaochan advance integration keeps ordinary enrollment free of coupon requests and flags", async () => {
+    const c = await advanceEnrollmentSession("ordinary", Math.floor(Date.now() / 60_000) * 60_000);
+    const options = await call("/api/xiaochan/schedule-options", { offerId: "xiaochan:42" }, "POST", c);
+    assert.equal(options.status, 200);
+    assert.deepEqual((await options.json()).advanceWindows, []);
+    const response = await call("/api/xiaochan/enroll", { offerId: "xiaochan:42" }, "POST", c);
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).offers.xiaochan[0].enrollment, { state: "enrolled", orderId: "9042" });
+  });
   await test("Service restart restores pending schedules and never replays interrupted quota requests", async () => {
     const c = await enrollmentSession("enroll-scheduled-restart");
     const snapshot = await (await fetch(base + "/api/dashboard", { headers: { cookie: c } })).json();
@@ -1037,7 +1211,7 @@ try {
     await writeFile(join(restartDirectory, "session.key"), key);
     await writeFile(join(restartDirectory, `${id}.enc`), Buffer.concat([iv, cipher.getAuthTag(), encrypted]));
     const restartPort = port + 1;
-    const child = spawn(process.execPath, ["--import", join(process.cwd(), "tests/fixtures/waimai-upstream.mjs"), ".output/server/index.mjs"], {
+    const child = spawn(process.execPath, ["--import", join(process.cwd(), "tests/fixtures/waimai-upstream.mjs"), "dist/service/index.mjs"], {
       env: { ...process.env, HOST: "127.0.0.1", FOOD_ALLOW_LAN: "0", PORT: String(restartPort), FOOD_DATA_DIR: restartDirectory }, stdio: "ignore",
     });
     try {
@@ -1242,6 +1416,322 @@ try {
       await browser.close();
     }
   });
+  await test("Advance schedule UI selects the verified early window, excludes expiry gaps and preserves ordinary Waimai times", async () => {
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ channel: "chrome", headless: true });
+    try {
+      const page = await browser.newPage();
+      await page.clock.setFixedTime(new Date("2026-11-07T04:00:00Z"));
+      const offer = { name: "超前券界面测试店", category: "美食", inventory: 3, distanceMeters: 1000,
+        startTime: "13:00", endTime: "14:00", requirement: "无需评价", source: "live",
+        validFrom: "2026-11-07T05:00:00Z", collectedAt: "2026-11-07T04:00:00Z",
+        rule: { kind: "fixed", thresholdCents: 2000, cashbackCents: 1500 } };
+      const dashboard: any = {
+        location: { label: "南宁", cityName: "南宁市", cityCode: 450103, latitude: 22.82, longitude: 108.36 },
+        connections: {
+          xiaochan: { state: "connected", label: "已登录", profile: { userId: "6789" } },
+          waimai: { state: "connected", label: "已登录", profile: { userId: waimaiUid } },
+          meituan: { state: "disconnected", label: "未连接" },
+        },
+        offers: {
+          xiaochan: [{ ...offer, provider: "xiaochan", id: "xiaochan:42" }],
+          waimai: [{ ...offer, provider: "waimai", id: "waimai:101:202", enrollmentAvailable: true }],
+          meituan: [{ ...offer, provider: "meituan", id: "meituan:1" }],
+        }, updatedAt: {}, enrollmentSchedules: [],
+      };
+      let optionsMode = "gap", optionsCalls = 0;
+      let releaseOptions!: () => void;
+      const optionsGate = new Promise<void>(resolve => { releaseOptions = resolve; });
+      const schedules: Array<{ path: string; body: any }> = [];
+      await page.route("**/api/**", async route => {
+        const request = route.request(), path = new URL(request.url()).pathname;
+        if (path === "/api/xiaochan/schedule-options") {
+          optionsCalls++;
+          assert.equal(request.method(), "POST");
+          assert.equal(request.headers()["x-food-request"], "1");
+          assert.deepEqual(request.postDataJSON(), { offerId: "xiaochan:42" });
+          if (optionsCalls === 1) await optionsGate;
+          if (optionsMode === "fail") {
+            await route.fulfill({ status: 502, json: { statusMessage: "超前抢单券查询失败，请重试" } });
+          } else await route.fulfill({ json: {
+            offerId: "xiaochan:42", advanceWindows: optionsMode === "empty" ? [] : [{
+              start: Date.parse("2026-11-07T04:30:00Z"), end: Date.parse("2026-11-07T04:40:00Z"),
+            }],
+          } });
+          return;
+        }
+        if (/^\/api\/(xiaochan|waimai)\/schedule$/.test(path)) {
+          const body = request.postDataJSON();
+          const provider = path.split("/")[2]!;
+          if (request.method() === "DELETE") {
+            dashboard.enrollmentSchedules = [];
+            delete dashboard.offers[provider][0].enrollmentSchedule;
+          } else {
+            schedules.push({ path, body });
+            const schedule = { offerId: body.offerId, name: offer.name, runAt: new Date(body.runAt).toISOString(), state: "scheduled" };
+            dashboard.enrollmentSchedules = [schedule];
+            dashboard.offers[provider][0].enrollmentSchedule = schedule;
+          }
+          await route.fulfill({ json: dashboard });
+          return;
+        }
+        await route.fulfill({ json: path === "/api/sync" ? { data: dashboard, errors: [], message: "同步完成" } : dashboard });
+      });
+      await page.goto(base);
+      await page.waitForFunction(() => document.querySelectorAll(".enrollment-button").length === 1 &&
+        !document.querySelector(".sync-button")?.textContent?.includes("正在同步"));
+      assert.equal(await page.locator(".enrollment-button").isDisabled(), true, "Ordinary enrollment must remain closed before the official opening");
+      await page.locator(".schedule-enrollment-button").click();
+      const dialog = page.getByRole("dialog", { name: "预约报名", exact: true });
+      const confirm = dialog.getByRole("button", { name: "确认预约", exact: true });
+      const couponSwitch = dialog.getByRole("switch", { name: /使用超前抢单券/ });
+      await dialog.getByText("查询卡券…", { exact: true }).waitFor();
+      assert.equal(await confirm.isDisabled(), true);
+      assert.equal(await couponSwitch.isDisabled(), true);
+      releaseOptions();
+      await dialog.getByText("最早 12:30", { exact: true }).waitFor();
+      assert.equal(await couponSwitch.isChecked(), true);
+      assert.equal((await dialog.getByRole("combobox", { name: "报名小时" }).innerText()).trim(), "12");
+      assert.equal((await dialog.getByRole("combobox", { name: "报名分钟" }).innerText()).trim(), "30");
+      assert.equal((await dialog.getByRole("combobox", { name: "报名秒钟" }).innerText()).trim(), "00");
+      await dialog.getByRole("combobox", { name: "报名分钟" }).click();
+      const minutes = page.getByRole("listbox", { name: "报名分钟" });
+      assert.deepEqual((await minutes.getByRole("option").allTextContents()).map(value => value.trim()),
+        Array.from({ length: 10 }, (_, i) => String(i + 30)));
+      await minutes.getByRole("option", { name: "30", exact: true }).click();
+      await dialog.getByRole("combobox", { name: "报名小时" }).click();
+      assert.deepEqual((await page.getByRole("listbox", { name: "报名小时" }).getByRole("option").allTextContents()).map(value => value.trim()), ["12"]);
+      await page.keyboard.press("Escape");
+      if (process.env.FOOD_UI_SCREENSHOTS) await page.screenshot({ path: "/tmp/food-advance-coupon-desktop.png" });
+      await couponSwitch.uncheck();
+      assert.equal(await couponSwitch.isChecked(), false);
+      assert.equal((await dialog.getByRole("combobox", { name: "报名小时" }).innerText()).trim(), "13");
+      assert.equal((await dialog.getByRole("combobox", { name: "报名分钟" }).innerText()).trim(), "00");
+      await dialog.getByRole("combobox", { name: "报名小时" }).click();
+      assert.deepEqual((await page.getByRole("listbox", { name: "报名小时" }).getByRole("option").allTextContents()).map(value => value.trim()), ["13"]);
+      await page.keyboard.press("Escape");
+      await couponSwitch.focus();
+      await page.keyboard.press("Space");
+      assert.equal(await couponSwitch.isChecked(), true);
+      assert.equal((await dialog.getByRole("combobox", { name: "报名小时" }).innerText()).trim(), "12");
+      assert.equal((await dialog.getByRole("combobox", { name: "报名分钟" }).innerText()).trim(), "30");
+      const beforeToggle = optionsCalls;
+      await page.setViewportSize({ width: 375, height: 812 });
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+      const couponBounds = await dialog.locator(".schedule-coupon-option").boundingBox();
+      const dialogBounds = await dialog.boundingBox();
+      assert.ok(couponBounds && dialogBounds && couponBounds.x >= dialogBounds.x && couponBounds.x + couponBounds.width <= dialogBounds.x + dialogBounds.width);
+      if (process.env.FOOD_UI_SCREENSHOTS) await page.screenshot({ path: "/tmp/food-advance-coupon-mobile.png" });
+      await couponSwitch.uncheck();
+      assert.equal(optionsCalls, beforeToggle, "Toggling a coupon must not repeat the upstream lookup");
+      await confirm.click();
+      await page.locator(".scheduled-enrollments").waitFor();
+      assert.deepEqual(schedules.pop(), { path: "/api/xiaochan/schedule", body: {
+        offerId: "xiaochan:42", runAt: "2026-11-07T13:00:00+08:00",
+      } });
+      await page.locator(".scheduled-enrollments").getByRole("button", { name: "取消预约", exact: true }).click();
+      await page.locator(".scheduled-enrollments").waitFor({ state: "detached" });
+      await page.setViewportSize({ width: 1280, height: 720 });
+      await page.locator(".schedule-enrollment-button").click();
+      await dialog.getByText("最早 12:30", { exact: true }).waitFor();
+      await dialog.getByRole("button", { name: "关闭预约报名" }).click();
+      await page.locator(".schedule-enrollment-button").click();
+      await dialog.getByText("最早 12:30", { exact: true }).waitFor();
+      assert.equal(await couponSwitch.isChecked(), true);
+      await confirm.click();
+      await page.locator(".scheduled-enrollments").waitFor();
+      assert.deepEqual(schedules, [{ path: "/api/xiaochan/schedule", body: {
+        offerId: "xiaochan:42", runAt: "2026-11-07T12:30:00+08:00",
+      } }]);
+      await page.locator(".scheduled-enrollments").getByRole("button", { name: "取消预约", exact: true }).click();
+      await page.locator(".scheduled-enrollments").waitFor({ state: "detached" });
+
+      await page.locator(".schedule-enrollment-button").click();
+      await dialog.getByText("最早 12:30", { exact: true }).waitFor();
+      await page.clock.setFixedTime(new Date("2026-11-07T04:40:00Z"));
+      await couponSwitch.waitFor({ state: "detached" });
+      assert.equal((await dialog.getByRole("combobox", { name: "报名小时" }).innerText()).trim(), "13");
+      assert.equal(await confirm.isEnabled(), true);
+      await dialog.getByRole("button", { name: "关闭预约报名" }).click();
+      await page.clock.setFixedTime(new Date("2026-11-07T04:00:00Z"));
+
+      optionsMode = "empty";
+      await page.locator(".schedule-enrollment-button").click();
+      await dialog.getByText("查询卡券…", { exact: true }).waitFor({ state: "detached" });
+      assert.equal((await dialog.getByRole("combobox", { name: "报名小时" }).innerText()).trim(), "13");
+      assert.equal((await dialog.getByRole("combobox", { name: "报名分钟" }).innerText()).trim(), "00");
+      assert.equal(await dialog.getByText("使用超前抢单券", { exact: true }).count(), 0);
+      await dialog.getByRole("button", { name: "关闭预约报名" }).click();
+      optionsMode = "fail";
+      await page.locator(".schedule-enrollment-button").click();
+      await dialog.getByRole("alert").waitFor();
+      assert.equal((await dialog.getByRole("combobox", { name: "报名小时" }).innerText()).trim(), "13");
+      assert.equal(await confirm.isEnabled(), true, "Failed coupon lookup must retain ordinary scheduling");
+      await dialog.getByRole("button", { name: "关闭预约报名" }).click();
+
+      const beforeWaimai = optionsCalls;
+      await page.getByRole("button", { name: "歪麦", exact: true }).click();
+      await page.locator(".schedule-enrollment-button").click();
+      assert.equal((await dialog.getByRole("combobox", { name: "报名小时" }).innerText()).trim(), "13");
+      assert.equal(await dialog.getByText("使用超前抢单券", { exact: true }).count(), 0);
+      await confirm.click();
+      await page.locator(".scheduled-enrollments").waitFor();
+      assert.equal(optionsCalls, beforeWaimai);
+      assert.deepEqual(schedules.at(-1), { path: "/api/waimai/schedule", body: {
+        offerId: "waimai:101:202", runAt: "2026-11-07T13:00:00+08:00",
+      } });
+    } finally {
+      await browser.close();
+    }
+  });
+  await test("Waimai enrollment controls route by provider and preserve reversed cross-platform responses", async () => {
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ channel: "chrome", headless: true });
+    try {
+      const page = await browser.newPage();
+      const offer = { name: "双平台报名测试店", category: "美食", inventory: 3, distanceMeters: 1000,
+        startTime: "00:00", endTime: "24:00", requirement: "无需评价", source: "live",
+        rule: { kind: "fixed", thresholdCents: 2000, cashbackCents: 1500 }, collectedAt: new Date().toISOString() };
+      const dashboard: any = {
+        location: { label: "南宁", cityName: "南宁市", cityCode: 450103, latitude: 22.82, longitude: 108.36 },
+        connections: {
+          xiaochan: { state: "connected", label: "已登录", profile: { userId: "6789" } },
+          waimai: { state: "connected", label: "已登录", profile: { userId: waimaiUid } },
+          meituan: { state: "disconnected", label: "未连接" },
+        },
+        offers: {
+          xiaochan: [{ ...offer, provider: "xiaochan", id: "xiaochan:42" }],
+          waimai: [
+            { ...offer, provider: "waimai", id: "waimai:101:202", enrollmentAvailable: true },
+            { ...offer, provider: "waimai", id: "waimai:101:203", enrollmentAvailable: false },
+            { ...offer, provider: "waimai", id: "waimai:101:204" },
+          ],
+          meituan: [{ ...offer, provider: "meituan", id: "meituan:1" }],
+        }, updatedAt: {}, enrollmentSchedules: [],
+      };
+      const requests: Array<{ path: string; method: string; offerId: string }> = [];
+      const pending = new Map<string, () => Promise<void>>();
+      const enrollmentStarted = new Map<string, () => void>();
+      await page.route("**/api/**", async route => {
+        const request = route.request();
+        const path = new URL(request.url()).pathname;
+        const action = /^\/api\/(xiaochan|waimai)\/(enroll|cancel|schedule)$/.exec(path);
+        if (action) {
+          const provider = action[1]!;
+          const { offerId, runAt } = request.postDataJSON();
+          assert.equal(request.headers()["x-food-request"], "1");
+          assert.equal(offerId.split(":")[0], provider);
+          requests.push({ path, method: request.method(), offerId });
+          const activity = dashboard.offers[provider].find((row: any) => row.id === offerId);
+          assert.ok(activity);
+          if (action[2] === "enroll") {
+            assert.equal(request.method(), "POST");
+            const response = structuredClone(dashboard);
+            const enrollment = { state: "enrolled", orderId: `${provider}-order` };
+            response.offers[provider][0].enrollment = enrollment;
+            pending.set(offerId, async () => {
+              pending.delete(offerId);
+              activity.enrollment = enrollment;
+              await route.fulfill({ json: response });
+            });
+            enrollmentStarted.get(offerId)?.();
+            return;
+          }
+          if (action[2] === "cancel") {
+            assert.equal(request.method(), "POST");
+            delete activity.enrollment;
+          } else {
+            dashboard.enrollmentSchedules = dashboard.enrollmentSchedules.filter((row: any) => row.offerId !== offerId);
+            if (request.method() === "DELETE") delete activity.enrollmentSchedule;
+            else {
+              assert.equal(request.method(), "POST");
+              assert.ok(Date.parse(runAt) > Date.now());
+              assert.match(runAt, /\+08:00$/);
+              activity.enrollmentSchedule = { offerId, name: activity.name, state: "scheduled", runAt: new Date(runAt).toISOString() };
+              dashboard.enrollmentSchedules.push(activity.enrollmentSchedule);
+            }
+          }
+          await route.fulfill({ json: dashboard });
+          return;
+        }
+        await route.fulfill({ json: path === "/api/sync" ? { data: dashboard, errors: [], message: "同步完成" } : dashboard });
+      });
+      await page.goto(base);
+      await page.waitForFunction(() => document.querySelectorAll(".enrollment-button").length === 1 &&
+        !document.querySelector(".sync-button")?.textContent?.includes("正在同步"));
+      const button = page.locator(".enrollment-button");
+      const xiaochanStarted = new Promise<void>(resolve => enrollmentStarted.set("xiaochan:42", resolve));
+      await button.click();
+      await xiaochanStarted;
+      await page.getByRole("button", { name: "歪麦", exact: true }).click();
+      assert.equal(await button.count(), 1, "Unsupported and stale Waimai activities must not expose enrollment controls");
+      assert.equal(await button.isEnabled(), true, "A pending Xiaochan request must not disable Waimai enrollment");
+      const waimaiStarted = new Promise<void>(resolve => enrollmentStarted.set("waimai:101:202", resolve));
+      await button.click();
+      await waimaiStarted;
+      await pending.get("waimai:101:202")!();
+      await page.waitForFunction(() => document.querySelector(".enrollment-button")?.textContent === "已报名");
+      await pending.get("xiaochan:42")!();
+      await page.getByRole("button", { name: "小蚕", exact: true }).click();
+      await page.waitForFunction(() => document.querySelector(".enrollment-button")?.textContent === "已报名");
+      await page.getByRole("button", { name: "歪麦", exact: true }).click();
+      assert.equal(await button.textContent(), "已报名", "The older Xiaochan dashboard must not revert Waimai's result");
+      assert.deepEqual(requests.map(row => row.path), ["/api/xiaochan/enroll", "/api/waimai/enroll"]);
+
+      page.once("dialog", dialog => dialog.dismiss());
+      await page.locator(".cancel-enrollment-button").click();
+      assert.equal(requests.length, 2, "Dismissing confirmation must not cancel enrollment");
+      assert.equal(await button.textContent(), "已报名");
+      page.once("dialog", dialog => dialog.accept());
+      await page.locator(".cancel-enrollment-button").click();
+      await page.waitForFunction(() => document.querySelector(".enrollment-button")?.textContent === "报名");
+      assert.deepEqual(requests.at(-1), { path: "/api/waimai/cancel", method: "POST", offerId: "waimai:101:202" });
+
+      await page.locator(".schedule-enrollment-button").click();
+      await page.getByRole("dialog", { name: "预约报名", exact: true }).waitFor();
+      await page.getByRole("button", { name: "确认预约", exact: true }).click();
+      await page.locator(".scheduled-enrollments").waitFor();
+      assert.equal(await button.isDisabled(), true);
+      assert.deepEqual(requests.at(-1), { path: "/api/waimai/schedule", method: "POST", offerId: "waimai:101:202" });
+      await page.getByRole("button", { name: "小蚕", exact: true }).click();
+      assert.equal(await button.textContent(), "已报名");
+      await page.locator(".scheduled-enrollments").getByRole("button", { name: "取消预约", exact: true }).click();
+      await page.locator(".scheduled-enrollments").waitFor({ state: "detached" });
+      assert.deepEqual(requests.at(-1), { path: "/api/waimai/schedule", method: "DELETE", offerId: "waimai:101:202" });
+      assert.equal(await button.textContent(), "已报名", "Cancelling a Waimai task from another tab must preserve Xiaochan enrollment");
+
+      await page.getByRole("button", { name: "歪麦", exact: true }).click();
+      assert.equal(await button.isEnabled(), true);
+      await page.locator(".schedule-enrollment-button").click();
+      await page.getByRole("button", { name: "确认预约", exact: true }).click();
+      await page.locator(".scheduled-enrollments").waitFor();
+      dashboard.enrollmentSchedules = [];
+      delete dashboard.offers.waimai[0].enrollmentSchedule;
+      dashboard.offers.waimai[0].enrollment = { state: "enrolled", orderId: "waimai-scheduled-order" };
+      await page.waitForFunction(() => document.querySelector(".enrollment-button")?.textContent === "已报名");
+      assert.equal(await page.locator(".notice").innerText(), "预约报名成功");
+      assert.equal(await page.locator(".scheduled-enrollments").count(), 0);
+      await page.getByRole("button", { name: "小蚕", exact: true }).click();
+      assert.equal(await button.textContent(), "已报名");
+      assert.equal(requests.filter(row => row.path.endsWith("/enroll")).length, 2);
+
+      dashboard.offers.waimai[0].enrollment = { state: "unknown", orderId: "waimai-wait-payment-order" };
+      await page.getByRole("button", { name: "歪麦", exact: true }).click();
+      await page.locator(".sync-button").click();
+      await page.waitForFunction(() => document.querySelector(".enrollment-button")?.textContent === "查看报名");
+      assert.equal(await button.isEnabled(), true, "An uncertain order must retain its enrollment lookup action");
+      assert.equal(await page.locator(".cancel-enrollment-button").isVisible(), true);
+      page.once("dialog", dialog => dialog.accept());
+      await page.locator(".cancel-enrollment-button").click();
+      await page.waitForFunction(() => document.querySelector(".enrollment-button")?.textContent === "报名");
+      assert.deepEqual(requests.at(-1), { path: "/api/waimai/cancel", method: "POST", offerId: "waimai:101:202" });
+      assert.equal(requests.filter(row => row.path.endsWith("/enroll")).length, 2, "Cancelling an uncertain saved order must not submit another enrollment");
+      await page.getByRole("button", { name: "小蚕", exact: true }).click();
+      assert.equal(await button.textContent(), "已报名");
+    } finally {
+      await browser.close();
+    }
+  });
   for (const password of ["enroll-network-failure", "enroll-http-failure", "enroll-missing-order"]) {
     await test(`${password} persists unknown enrollment and blocks subsequent quota attempts`, async () => {
       const c = await enrollmentSession(password);
@@ -1394,11 +1884,8 @@ try {
     for (const provider of ["xiaochan", "waimai"])
       assert.equal((await call("/api/sync", { provider }, "POST", c)).status, 400);
     const id = c.split("=")[1]!;
-    const encrypted = await readFile(join(directory, id + ".enc"));
-    const key = await readFile(join(directory, "session.key"));
-    const decipher = createDecipheriv("aes-256-gcm", key, encrypted.subarray(0, 12));
-    decipher.setAuthTag(encrypted.subarray(12, 28));
-    const saved = JSON.parse(Buffer.concat([decipher.update(encrypted.subarray(28)), decipher.final()]).toString());
+    const encrypted = storedPayload(directory, id);
+    const saved = storedSnapshot(directory, id);
     assert.equal(saved.xiaochanHeaders, undefined);
     assert.equal(saved.waimaiToken, undefined);
   });

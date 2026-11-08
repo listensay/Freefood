@@ -108,6 +108,8 @@ export function normalizeXiaochan(data: any): Offer[] {
       },
       collectedAt: now,
       source: "live",
+      advanceEnrollmentAvailable: !row.if_seckill && !row.is_major && !row.is_brand_promotion &&
+        !row.is_brand && Number(row.big_brand_type) !== 4,
     });
   }
   return offers;
@@ -259,5 +261,6 @@ export async function fetchXiaochan(
       return result;
     },
     scope.radiusMeters,
+    { delayMs: 6_000 },
   );
 }
