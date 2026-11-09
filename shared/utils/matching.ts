@@ -1,4 +1,5 @@
 import type { Offer, StoreMatch, StoreMatchGroup } from "../types";
+import { isTastingOffer } from "../types";
 
 export function normalizeStoreName(name: string): string {
   return name
@@ -27,8 +28,9 @@ function similarity(a: string, b: string): number {
 export function matchStores(bawangcan: Offer[], meituan: Offer[]): StoreMatch[] {
   const matches: StoreMatch[] = [];
   for (const x of bawangcan) {
-    if (x.provider === "meituan") continue;
+    if (isTastingOffer(x)) continue;
     for (const m of meituan) {
+      if (!isTastingOffer(m) || x.provider === m.provider) continue;
       let confidence: StoreMatch["confidence"] | undefined;
       let reason = "";
       // Internal platform IDs and anonymized Meituan -100/0 are not shared store IDs.
@@ -74,6 +76,7 @@ export function groupStoreMatches(matches: StoreMatch[]): StoreMatchGroup[] {
   for (const match of matches) {
     const id = JSON.stringify([
       match.bawangcan.provider,
+      match.meituan.provider,
       storeIdentity(match.bawangcan),
       storeIdentity(match.meituan),
       match.bawangcan.product?.name.normalize("NFKC").trim().toLowerCase() || "",

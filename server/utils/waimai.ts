@@ -2,6 +2,7 @@ import { beginLoggedRequest } from "./runtime-logs";
 import {
   constants,
   createCipheriv,
+  createHash,
   createDecipheriv,
   createPrivateKey,
   createPublicKey,
@@ -234,7 +235,12 @@ export function normalizeWaimai(response: any): Offer[] {
   const offers: Offer[] = [];
   const seen = new Set<string>();
   for (const row of rows) {
-    // Percentage Meituan bounty is an affiliate plan, not an additional Bawangcan rebate.
+    if (Number(row.shopPlatformType) === 2) {
+      for (const offer of normalizeWaimaiTasting(row, collectedAt)) {
+        if (!seen.has(offer.id)) { seen.add(offer.id); offers.push(offer); }
+      }
+      continue;
+    }
     if (![1, 3].includes(Number(row.shopPlatformType))) continue;
     if (!row.shopName || !row.id || !Array.isArray(row.overbearfoodList))
       throw new Error("歪麦活动缺少门店或返现规则");
@@ -291,6 +297,50 @@ export function normalizeWaimai(response: any): Offer[] {
     }
   }
   return offers;
+}
+
+function normalizeWaimaiTasting(row: any, collectedAt: string): Offer[] {
+  if (!row.shopName || !row.id || !Array.isArray(row.overbearfoodList))
+    throw new Error("歪麦试吃官缺少门店或返现规则");
+  return row.overbearfoodList.filter((sku: any) => sku.takeawayPlatform === "meituan").map((sku: any) => {
+    // meituanRatio is the ordinary-user rate in basis points; maxReturnMoney includes VIP compensation.
+    const ratioBps = Number(sku.meituanRatio);
+    if (!["number", "string"].includes(typeof sku.meituanRatio) || !/^\d+$/.test(String(sku.meituanRatio)) ||
+      !Number.isSafeInteger(ratioBps) || ratioBps < 0 || ratioBps > 10_000)
+      throw new Error("歪麦试吃官返现比例异常");
+    const cap = toCents(sku.maxReturnMoney);
+    const vip = toCents(sku.vipCompensationMoney ?? 0);
+    if (vip > cap) throw new Error("歪麦试吃官返现上限异常");
+    const inventory = sku.surplusNumber == null ? undefined : Number(sku.surplusNumber);
+    if (inventory !== undefined && (!Number.isSafeInteger(inventory) || inventory < 0))
+      throw new Error("歪麦试吃官名额格式发生变化");
+    // The list can return null SKU IDs. Keep review/no-review and user tiers distinct across pages.
+    const activityId = sku.id || createHash("sha256").update(JSON.stringify([
+      sku.mealType, sku.userType, sku.packageType, sku.releaseTimeQuantum, ratioBps, cap - vip,
+    ])).digest("hex").slice(0, 24);
+    const poi = String(row.wm_poi_id || row.meituanPoiId || "");
+    const distance = /^(\d+(?:\.\d+)?)\s*(km|m|公里|米)$/i.exec(String(row.distance || ""));
+    return {
+      id: `waimai:tasting:${row.id}:${activityId}`,
+      provider: "waimai",
+      activityKind: "tasting",
+      name: String(row.shopName),
+      category: String(row.categoryName || "美食"),
+      address: typeof row.shopAddress === "string" ? row.shopAddress : undefined,
+      image: safeUrl(row.logoAddress),
+      meituanPoiId: /^\d+$/.test(poi) && BigInt(poi) > 0 ? poi : undefined,
+      opaquePoiId: String(row.id),
+      distanceMeters: distance ? Math.round(Number(distance[1]) * (/^(km|公里)$/i.test(distance[2]!) ? 1000 : 1)) : undefined,
+      inventory,
+      ...timeRange(sku.releaseTimeQuantum),
+      requirement: requirements[sku.mealType] || "请查看歪麦活动要求",
+      // Review-required and review-free plans are complete alternative rates, not additive bonuses.
+      rule: { kind: "percentage", thresholdCents: 0, ratioBps, capCents: cap - vip },
+      collectedAt,
+      source: "live",
+      enrollmentAvailable: false,
+    };
+  });
 }
 
 async function encryptedService(
@@ -450,27 +500,34 @@ export async function fetchWaimai(
     brandIdentityFlag: null,
     tabType: "bwc",
   };
-  let cursor: unknown = null;
-  const fetchPage = async (): Promise<ActivityPage> => {
-    try {
-      const data = await send(SHOP_URL, { ...params, scrollPageData: cursor });
-      const offers = normalizeWaimai(data);
-      cursor = data.data.scrollPageData ?? null;
-      if (data.data.hasMore === true && cursor === null)
-        throw new Error("Missing activity page cursor");
-      return {
-        offers,
-        rowKeys: data.data.data.map((row: any) => String(row.id)),
-        hasMore: data.data.data.length > 0 && cursor !== null && data.data.hasMore !== false,
-      };
-    } catch (error: any) {
-      if (error.statusCode) throw error;
-      throw createError({
-        statusCode: 502,
-        statusMessage: "歪麦活动无法解析，请稍后重试",
-      });
-    }
+  const fetchList = async (tasting: boolean) => {
+    let cursor: unknown = null;
+    const fetchPage = async (): Promise<ActivityPage> => {
+      try {
+        const data = await send(SHOP_URL, { ...params, scrollPageData: cursor,
+          ...(tasting ? { overbearFoodType: 2, overbearFoodTypes: [2], takeawayPlatform: "" } : {}),
+        });
+        const offers = normalizeWaimai(data);
+        cursor = data.data.scrollPageData ?? null;
+        if (data.data.hasMore === true && cursor === null)
+          throw new Error("Missing activity page cursor");
+        return {
+          offers,
+          rowKeys: data.data.data.map((row: any) => String(row.id)),
+          hasMore: data.data.data.length > 0 && cursor !== null && data.data.hasMore !== false,
+        };
+      } catch (error: any) {
+        if (error.statusCode) throw error;
+        throw createError({
+          statusCode: 502,
+          statusMessage: "歪麦活动无法解析，请稍后重试",
+        });
+      }
+    };
+    if (!scope) return (await fetchPage()).offers;
+    return collectActivityPages(fetchPage, scope.radiusMeters);
   };
-  if (!scope) return (await fetchPage()).offers;
-  return collectActivityPages(fetchPage, scope.radiusMeters);
+  const bawangcan = await fetchList(false);
+  const tasting = await fetchList(true);
+  return [...new Map([...bawangcan, ...tasting].map(offer => [offer.id, offer])).values()];
 }

@@ -50,6 +50,7 @@ export interface EnrollmentSchedule {
 export interface Offer {
   id: string;
   provider: Provider;
+  activityKind?: "bawangcan" | "tasting";
   name: string;
   category: string;
   address?: string;
@@ -78,9 +79,20 @@ export interface Offer {
 export interface StoreMatch {
   id: string;
   bawangcan: Offer;
+  // The selected tasting channel; may be Meituan or Waimai.
   meituan: Offer;
   confidence: "id" | "name" | "candidate";
   reason: string;
+}
+
+export function isTastingOffer(offer: Offer): boolean {
+  return offer.provider === "meituan" ||
+    (offer.provider === "waimai" && offer.activityKind === "tasting");
+}
+
+export function offerProviderName(offer: Offer): string {
+  return offer.provider === "waimai" && isTastingOffer(offer)
+    ? "歪麦试吃官" : providerNames[offer.provider];
 }
 
 export interface StoreMatchGroup {

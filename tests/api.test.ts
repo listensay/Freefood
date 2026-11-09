@@ -451,6 +451,27 @@ try {
     assert.equal(result.data.waimaiAccount, undefined);
     assert.equal((await call("/api/sync", { provider: "waimai" })).status, 429);
   });
+  await test("Waimai sync stores both activity kinds and preserves old offers when tasting sync fails", async () => {
+    for (const failure of [false, true]) {
+      const c = await seededWaimai(await freshCookie(), failure ? "wechat-waimai-test-tasting-failure" : "wechat-waimai-test-tasting");
+      await call("/api/location", { label: "南宁", cityName: "南宁市", cityCode: 450103, latitude: 22.82, longitude: 108.36 }, "POST", c);
+      const previous = await (await call("/api/import", { provider: "waimai", offers: [row] }, "POST", c)).json();
+      const response = await call("/api/sync", { provider: "waimai" }, "POST", c);
+      assert.equal(response.status, 200);
+      const result = await response.json();
+      if (failure) {
+        assert.equal(result.errors.length, 1);
+        assert.deepEqual(result.data.offers.waimai, previous.offers.waimai);
+        assert.equal(result.data.updatedAt.waimai, previous.updatedAt.waimai);
+      } else {
+        assert.deepEqual(result.errors, []);
+        assert.equal(result.data.offers.waimai.length, 2);
+        const tasting = result.data.offers.waimai.find((offer: any) => offer.activityKind === "tasting");
+        assert.deepEqual(tasting.rule, { kind: "percentage", thresholdCents: 0, ratioBps: 5300, capCents: 1510 });
+        assert.equal(tasting.enrollmentAvailable, false);
+      }
+    }
+  });
   await test("Switching providers can immediately sync Waimai while Xiaochan retains its own cooldown", async () => {
     const snapshot = await (await fetch(base + "/api/dashboard")).json();
     snapshot.xiaochanAccount = { silkId: "123456789", userId: "6789", accessToken: "corrected-xiaochan-test-session" };
@@ -608,6 +629,61 @@ try {
         assert.deepEqual(requested, [{ automatic: true }, { automatic: false }, { automatic: true }]);
         await context.close();
       }
+    } finally { await browser.close(); }
+  });
+  await test("Tasting channel cards preserve separate prices, review filters and mobile layout without a Meituan connection", async () => {
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ channel: "chrome", headless: true });
+    try {
+      const page = await browser.newPage();
+      const activity = { name: "试吃官测试（同一分店）", category: "美食", inventory: 4, distanceMeters: 1200,
+        requirement: "无需评价", source: "live", collectedAt: new Date().toISOString() };
+      const x = { ...activity, id: "xiaochan:42", provider: "xiaochan",
+        rule: { kind: "fixed", thresholdCents: 2500, cashbackCents: 2000 } };
+      const tasting = { ...activity, id: "waimai:tasting:shop:review", provider: "waimai", activityKind: "tasting",
+        requirement: "品鉴意见", enrollmentAvailable: false,
+        rule: { kind: "percentage", thresholdCents: 0, ratioBps: 5300, capCents: 1510 } };
+      const dashboard: any = {
+        location: { label: "南宁", cityName: "南宁市", cityCode: 450103, latitude: 22.82, longitude: 108.36 },
+        connections: { xiaochan: { state: "connected", label: "已登录" }, waimai: { state: "connected", label: "已登录" },
+          meituan: { state: "disconnected", label: "未连接" } },
+        offers: { xiaochan: [x], waimai: [
+          { ...x, id: "waimai:shop:sku", provider: "waimai", requirement: "品鉴意见" }, tasting,
+          { ...tasting, id: "waimai:tasting:shop:no-review", requirement: "无需评价",
+            rule: { ...tasting.rule, ratioBps: 4800, capCents: 1310 } },
+        ], meituan: [{ ...activity, id: "meituan:1", provider: "meituan",
+          rule: { kind: "percentage", thresholdCents: 0, ratioBps: 3500, capCents: 1200 } }] },
+        updatedAt: {}, enrollmentSchedules: [],
+      };
+      await page.route("**/api/**", route => route.fulfill({ json: route.request().url().endsWith("/api/sync")
+        ? { data: dashboard, errors: [], message: "同步完成" } : dashboard }));
+      await page.goto(base);
+      await page.waitForFunction(() => document.querySelectorAll(".store-card").length === 3);
+      const card = page.locator('.store-card[data-tasting-provider="waimai"]');
+      assert.equal(await card.count(), 1);
+      assert.equal(await card.getAttribute("data-provider"), "xiaochan");
+      assert.deepEqual(await card.locator(".net-price > strong").allTextContents(), ["¥8.25", "¥7.00"]);
+      assert.equal(await card.getByText("歪麦试吃官", { exact: true }).count(), 2);
+      assert.equal(await card.getByText("美团试吃官", { exact: true }).count(), 0);
+      assert.equal(await card.locator(".enrollment-button").count(), 2);
+      assert.equal(await page.locator(".store-card").first().getAttribute("data-tasting-provider"), "waimai");
+      await page.getByRole("button", { name: "双方无需评价", exact: true }).click();
+      assert.equal(await page.locator(".store-card").count(), 2);
+      assert.equal(await card.locator(".activity-variant").count(), 1);
+      assert.equal(await card.locator(".net-price > strong").textContent(), "¥7.00");
+      await page.getByRole("button", { name: "全部", exact: true }).click();
+      for (const width of [1280, 375]) {
+        await page.setViewportSize({ width, height: 900 });
+        await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+        if (process.env.FOOD_UI_SCREENSHOTS) await page.screenshot({ path: `/tmp/food-tasting-${width}.png`, fullPage: width > 375 });
+      }
+      dashboard.offers.meituan = [];
+      const synced = page.waitForResponse(response => response.url().endsWith("/api/sync"));
+      await page.getByRole("button", { name: "同步活动", exact: true }).click();
+      await synced;
+      await page.waitForFunction(() => document.querySelectorAll(".store-card").length === 1);
+      assert.equal(await card.locator(".activity-variant").count(), 2);
     } finally { await browser.close(); }
   });
   await test("Combined sync supports either connected platform and requires a city only for connected Waimai", async () => {

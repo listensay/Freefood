@@ -9,6 +9,11 @@ export function parseOffers(input: unknown, provider: Provider): Offer[] {
     if (!entry || typeof entry !== "object")
       throw new Error("活动数据格式错误");
     const row = entry as Record<string, unknown>;
+    if (row.activityKind !== undefined &&
+      (row.activityKind !== "bawangcan" && row.activityKind !== "tasting" ||
+        row.activityKind === "tasting" && provider === "xiaochan" ||
+        row.activityKind === "bawangcan" && provider === "meituan"))
+      throw new Error("活动类型无效");
     if (
       typeof row.name !== "string" ||
       !row.name.trim() ||
@@ -57,7 +62,7 @@ export function parseOffers(input: unknown, provider: Provider): Offer[] {
     if (row.reviewBonus !== undefined) {
       const bonus = row.reviewBonus as ReviewBonus;
       if (
-        provider !== "meituan" ||
+        (provider !== "meituan" && !(provider === "waimai" && row.activityKind === "tasting")) ||
         !bonus ||
         !Number.isInteger(bonus.ratioBps) ||
         bonus.ratioBps < 0 ||
@@ -118,6 +123,7 @@ export function parseOffers(input: unknown, provider: Provider): Offer[] {
     return {
       id: `${provider}:${row.id}`,
       provider,
+      ...(row.activityKind ? { activityKind: row.activityKind as Offer["activityKind"] } : {}),
       name: row.name.trim(),
       rule: validRule,
       reviewBonus,

@@ -14,9 +14,9 @@ import {
   verifyWaimaiAccount,
 } from "../server/utils/waimai";
 import { calculatePrice, estimatePrice, activeAt } from "../shared/utils/pricing";
-import { matchStores } from "../shared/utils/matching";
+import { groupStoreMatches, matchStores } from "../shared/utils/matching";
 import { parseOffers } from "../shared/utils/import";
-import type { Offer } from "../shared/types";
+import { isTastingOffer, offerProviderName, type Offer } from "../shared/types";
 
 const sku = {
   id: "sku-1",
@@ -35,6 +35,20 @@ const store = {
   distance: "1.2km",
   overbearfoodList: [sku],
 };
+const tastingSku = {
+  id: null,
+  takeawayPlatform: "meituan",
+  overbearType: "meituan_overbear_food",
+  mealType: "overbear_food_evaluate",
+  userType: 1,
+  meituanRatio: 5300,
+  meituanVipRatio: 5800,
+  maxReturnMoney: "15.10",
+  vipCompensationMoney: "1.00",
+  surplusNumber: 4,
+  releaseTimeQuantum: null,
+};
+const tastingStore = { ...store, id: "opaque%2Fstore%3D", shopPlatformType: 2, overbearfoodList: [tastingSku] };
 const payload = (rows = [store]) => ({
   code: 200,
   data: { data: rows, scrollPageData: { page: 2 } },
@@ -65,7 +79,7 @@ test("Waimai adapter uses yuan accurately and excludes VIP compensation from ord
   assert.equal(offer.endTime, "24:00");
 });
 
-test("Waimai adapter preserves distinct SKUs and excludes Eleme, JD and Meituan affiliate bounty", () => {
+test("Waimai adapter preserves distinct SKUs and separates tasting offers from fixed rebates", () => {
   const data = payload([
     {
       ...store,
@@ -76,11 +90,12 @@ test("Waimai adapter preserves distinct SKUs and excludes Eleme, JD and Meituan 
         { ...sku, id: "jd", takeawayPlatform: "jd" },
       ],
     },
-    { ...store, id: "bounty", shopPlatformType: 2 },
+    tastingStore,
     { ...store, id: "fixed-3", shopPlatformType: 3 },
     store,
   ]);
-  assert.equal(normalizeWaimai(data).length, 3);
+  assert.equal(normalizeWaimai(data).length, 4);
+  assert.equal(normalizeWaimai(data).filter(isTastingOffer).length, 1);
   assert.equal(normalizeWaimai(payload([])).length, 0);
   assert.throws(() => normalizeWaimai({ data: [] }));
   for (const bad of [
@@ -92,6 +107,54 @@ test("Waimai adapter preserves distinct SKUs and excludes Eleme, JD and Meituan 
     assert.throws(() =>
       normalizeWaimai(payload([{ ...store, overbearfoodList: [bad] }])),
     );
+});
+
+test("Waimai tasting rates preserve ordinary-user caps, nullable IDs and independent review tiers", () => {
+  const noReview = { ...tastingSku, mealType: "overbear_food_no_evaluate", meituanRatio: 4800, maxReturnMoney: "13.10" };
+  const data = payload([{ ...tastingStore, overbearfoodList: [tastingSku, noReview, tastingSku] }] as any);
+  const offers = normalizeWaimai(data);
+  assert.equal(offers.length, 2);
+  assert.deepEqual(offers[0]!.rule, { kind: "percentage", thresholdCents: 0, ratioBps: 5300, capCents: 1410 });
+  assert.equal(offers[0]!.requirement, "品鉴意见");
+  assert.equal(offers[1]!.requirement, "无需评价");
+  assert.equal(offers[0]!.reviewBonus, undefined);
+  assert.equal(offers[0]!.meituanPoiId, undefined);
+  assert.equal(offers[0]!.opaquePoiId, tastingStore.id);
+  assert.equal(offers[0]!.enrollmentAvailable, false);
+  assert.equal(offerProviderName(offers[0]!), "歪麦试吃官");
+  assert.deepEqual(normalizeWaimai(data).map(offer => offer.id), offers.map(offer => offer.id));
+  for (const change of [
+    { meituanRatio: undefined }, { meituanRatio: "" }, { meituanRatio: true }, { meituanRatio: " " },
+    { meituanRatio: 10001 }, { meituanRatio: -1 },
+    { meituanRatio: 1.5 }, { maxReturnMoney: "1.001" }, { vipCompensationMoney: "16" }, { surplusNumber: -1 },
+  ]) assert.throws(() => normalizeWaimai(payload([{ ...tastingStore, overbearfoodList: [{ ...tastingSku, ...change }] }] as any)));
+});
+
+test("Xiaochan compares both tasting channels without stacking them or enabling Waimai self-pairs", () => {
+  const w = normalizeWaimai(payload())[0]!;
+  const x: Offer = { ...w, provider: "xiaochan", id: "xiaochan:42" };
+  const m: Offer = { ...w, provider: "meituan", id: "meituan:1",
+    rule: { kind: "percentage", thresholdCents: 0, ratioBps: 3500, capCents: 1200 } };
+  const tasting = normalizeWaimai(payload([tastingStore] as any))[0]!;
+  const matches = matchStores([x, w, tasting], [m, tasting, w]);
+  assert.equal(matches.length, 3);
+  assert.equal(groupStoreMatches(matches).length, 3);
+  assert.ok(matches.every(match => match.bawangcan.provider !== match.meituan.provider));
+  const quote = estimatePrice({ paidCents: 2500, bawangcan: x, meituan: tasting });
+  assert.equal(quote.xiaochanCents, 2000);
+  assert.equal(quote.waimaiCents, 1325);
+  assert.equal(quote.meituanCents, 0);
+  assert.equal(quote.totalRebateCents, 3325);
+  assert.equal(quote.balanceCents, 825);
+  assert.ok(quote.balanceCents > estimatePrice({ paidCents: 2500, bawangcan: x, meituan: m }).balanceCents);
+  assert.equal(estimatePrice({ paidCents: 4000, bawangcan: x, meituan: tasting }).tastingCents, 1410);
+  assert.throws(() => estimatePrice({ paidCents: 2500, bawangcan: tasting, meituan: m }));
+  assert.throws(() => estimatePrice({ paidCents: 2500, bawangcan: w, meituan: tasting }));
+  assert.equal(matchStores([x], [{ ...tasting, name: "好饭（另一分店）" }]).length, 0);
+  const imported = parseOffers([{ ...tasting, id: "tasting-1" }], "waimai")[0]!;
+  assert.equal(imported.activityKind, "tasting");
+  assert.equal(matchStores([x], [imported]).length, 1);
+  assert.throws(() => parseOffers([{ ...tasting, id: "bad" }], "xiaochan"));
 });
 
 test("Waimai pairs use the selected provider in matching, calculation and inactive warnings", () => {
@@ -230,8 +293,10 @@ function mockTransport(
   result = payload(),
   der = false,
   pages?: unknown[],
+  tastingPages?: unknown[],
 ): typeof fetch {
   let count = 0;
+  const pageIndexes = { bawangcan: 0, tasting: 0 };
   return async (url, init) => {
     count++;
     const headers = new Headers(init?.headers);
@@ -272,7 +337,6 @@ function mockTransport(
         ),
       });
     }
-    if (!pages) assert.equal(count, 2, "Only the first page is requested");
     assert.ok(String(url).endsWith("/shopIndex/getShopList"));
     const block = privateDecrypt(
       { key: serverKeys.privateKey, padding: constants.RSA_NO_PADDING },
@@ -290,12 +354,16 @@ function mockTransport(
     assert.deepEqual(body.userTypes, [1, 2, 3, 4]);
     assert.equal(body.version, 3);
     assert.equal(body.overbearListFlag, 1);
-    assert.equal(body.takeawayPlatform, "meituan");
-    assert.equal(body.overbearFoodType, 1);
-    assert.deepEqual(body.overbearFoodTypes, [1]);
-    assert.deepEqual(body.scrollPageData, pages && count > 2
-      ? (pages[count - 3] as any).data.scrollPageData : null);
-    const current = pages ? pages[count - 2] : result;
+    const tasting = body.overbearFoodType === 2;
+    const list = tasting ? tastingPages : pages;
+    const page = pageIndexes[tasting ? "tasting" : "bawangcan"]++;
+    if (!list) assert.equal(page, 0, "Only the first page of each list is requested");
+    assert.equal(body.takeawayPlatform, tasting ? "" : "meituan");
+    assert.equal(body.overbearFoodType, tasting ? 2 : 1);
+    assert.deepEqual(body.overbearFoodTypes, [tasting ? 2 : 1]);
+    assert.deepEqual(body.scrollPageData, list && page > 0
+      ? (list[page - 1] as any).data.scrollPageData : null);
+    const current = list ? list[page] : tasting ? { code: 200, data: { data: [], scrollPageData: null } } : result;
     assert.ok(current, "Only available pages are requested");
     if (!encrypted) return Response.json(current);
     const responseAes = "a".repeat(32);
@@ -308,6 +376,26 @@ function mockTransport(
     });
   };
 }
+
+test("Waimai sync paginates tasting independently and rejects an incomplete tasting scan", async () => {
+  const pages = [
+    { code: 200, data: { data: [store], scrollPageData: null } },
+  ];
+  const tastingPages = [
+    { code: 200, data: { data: [tastingStore], scrollPageData: { page: 2, next: "tasting-2" } } },
+    { code: 200, data: { data: [tastingStore, { ...tastingStore, id: "edge", distance: "7.0km" },
+      { ...tastingStore, id: "far", distance: "7.1km" }], scrollPageData: null } },
+  ];
+  const offers = await fetchWaimai(account, location,
+    mockTransport(account.token, true, payload(), false, pages, tastingPages), { radiusMeters: 7000 });
+  assert.equal(offers.length, 3);
+  assert.equal(offers.filter(isTastingOffer).length, 2);
+  for (const last of [
+    { code: 401 },
+    { code: 200, data: { data: [tastingStore], scrollPageData: null, hasMore: true } },
+  ]) await assert.rejects(fetchWaimai(account, location,
+    mockTransport(account.token, true, payload(), false, pages, [tastingPages[0], last]), { radiusMeters: 7000 }));
+});
 
 test("Waimai transport refreshes dynamic keys and handles encrypted authenticated responses", async () => {
   const result = await fetchWaimai(

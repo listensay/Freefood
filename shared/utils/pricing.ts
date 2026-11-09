@@ -1,5 +1,5 @@
 import type { Offer, RebateRule, ReviewBonus } from "../types";
-import { providerShortNames } from "../types";
+import { isTastingOffer, providerShortNames } from "../types";
 
 export function assertCents(value: number): number {
   if (!Number.isSafeInteger(value) || value < 0 || value > 100_000_000) {
@@ -108,8 +108,11 @@ export function estimatePrice(input: PriceInput) {
 
 function priceFor(input: PriceInput, availability: "current" | "rules") {
   const bawangcan = input.bawangcan ?? input.xiaochan;
-  if (bawangcan.provider === "meituan") throw new Error("请选择霸王餐活动");
+  if (isTastingOffer(bawangcan)) throw new Error("请选择霸王餐活动");
+  if (!isTastingOffer(input.meituan) || bawangcan.provider === input.meituan.provider)
+    throw new Error("请选择不同平台的试吃官活动");
   const name = providerShortNames[bawangcan.provider];
+  const tastingName = providerShortNames[input.meituan.provider];
   const paid = assertCents(input.paidCents);
   const fees = assertCents(input.excludedFeesCents ?? 0);
   if (fees > paid) throw new Error("不计返现费用不能超过实付金额");
@@ -135,9 +138,9 @@ function priceFor(input: PriceInput, availability: "current" | "rules") {
   if (eligible < bawangcan.rule.thresholdCents)
     warnings.push(`未达到${name}返现门槛`);
   if (eligible < input.meituan.rule.thresholdCents)
-    warnings.push("未达到美团返现门槛");
+    warnings.push(`未达到${tastingName}返现门槛`);
   if (!xActive) warnings.push(`${name}活动当前不可用`);
-  if (!mActive) warnings.push("美团活动当前不可用");
+  if (!mActive) warnings.push(`${tastingName}活动当前不可用`);
   if (!input.sameStoreConfirmed) warnings.push("分店待确认");
   if (!input.stackingConfirmed) warnings.push("叠加条件待确认");
   if (bawangcan.product && !input.productConfirmed)
@@ -147,10 +150,11 @@ function priceFor(input: PriceInput, availability: "current" | "rules") {
     eligibleCents: eligible,
     bawangcanCents: x,
     xiaochanCents: bawangcan.provider === "xiaochan" ? x : 0,
-    waimaiCents: bawangcan.provider === "waimai" ? x : 0,
-    meituanCents: m,
-    meituanBaseCents: mBase,
-    meituanReviewCents: mReview,
+    waimaiCents: bawangcan.provider === "waimai" ? x : input.meituan.provider === "waimai" ? m : 0,
+    tastingCents: m,
+    meituanCents: input.meituan.provider === "meituan" ? m : 0,
+    meituanBaseCents: input.meituan.provider === "meituan" ? mBase : 0,
+    meituanReviewCents: input.meituan.provider === "meituan" ? mReview : 0,
     totalRebateCents: x + m,
     balanceCents: balance,
     theoreticalNetCents: paid - x - m,

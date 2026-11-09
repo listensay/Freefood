@@ -114,6 +114,15 @@ globalThis.fetch = async (url, init) => {
       throw new Error("upstream unavailable");
     if (token === "verification-test-token")
       return Response.json({ code: 13001, data: { antiCrawlerResult: { reqBizType: "private-challenge" } } });
+    if (waimaiBody(init, true).overbearFoodType === 2) {
+      if (token === "wechat-waimai-test-tasting-failure") return Response.json({ code: 500 });
+      return Response.json({ code: 200, data: { data: token === "wechat-waimai-test-tasting" ? [{
+        id: "opaque-api-store", shopName: "API 测试（同一分店）", distance: "1.2km", shopPlatformType: 2,
+        overbearfoodList: [{ id: null, takeawayPlatform: "meituan", mealType: "overbear_food_evaluate",
+          meituanRatio: 5300, meituanVipRatio: 5300, maxReturnMoney: "15.10", vipCompensationMoney: "0.00",
+          surplusNumber: 4 }],
+      }] : [], scrollPageData: null } });
+    }
     return Response.json({
       code: 200,
       data: {

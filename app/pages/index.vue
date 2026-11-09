@@ -17,7 +17,7 @@ const scheduledTime = (value: string) => new Date(value).toLocaleString("zh-CN",
 const matches = computed(() =>
   matchStores(
     [...data.value.offers.xiaochan, ...data.value.offers.waimai],
-    data.value.offers.meituan,
+    [...data.value.offers.meituan, ...data.value.offers.waimai],
   ).filter(match =>
     matchWithinRadius(match, COMPARISON_RADIUS_METERS) &&
     (match.bawangcan.inventory ?? 0) > 0 &&

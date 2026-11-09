@@ -5,7 +5,7 @@ import ProviderBadge from "./ProviderBadge.vue";
 import { useFoodApp } from "../composables/useFoodApp";
 import { Check, MapPin, Utensils } from "@lucide/vue";
 import type { StoreMatchGroup } from "#shared/types";
-import { providerNames } from "#shared/types";
+import { offerProviderName, providerNames, providerShortNames } from "#shared/types";
 import { activeAt, estimatePrice, money, priceOutcome, ruleLabel, reviewBonusLabel, suggestedPaidCents } from "#shared/utils/pricing";
 import { todayEnrollmentWindow } from "#shared/utils/enrollment-time";
 const props = defineProps<{ group: StoreMatchGroup }>();
@@ -33,7 +33,7 @@ const distance = computed(() => {
     store-card flex min-w-0 flex-col rounded-md border border-hairline-soft bg-surface-card px-6 pt-6 pb-0
     shadow-[0_2px_8px_rgb(0_0_0_/_3%)] transition-[border-color,box-shadow] duration-160 ease-[ease]
     hover:shadow-[0_4px_16px_rgb(0_0_0_/_6%)] mobile:px-5 mobile:pt-5 narrow:px-4
-  " :class="{ 'has-variants': variants.length > 1 }" :data-provider="match.bawangcan.provider">
+  " :class="{ 'has-variants': variants.length > 1 }" :data-provider="match.bawangcan.provider" :data-tasting-provider="match.meituan.provider">
     <div class="store-main relative flex items-center gap-[18px]">
       <div class="store-picture grid size-16 shrink-0 place-items-center overflow-hidden rounded-md bg-surface-soft text-muted">
         <RemoteImage
@@ -64,13 +64,13 @@ const distance = computed(() => {
         </div>
         <div class="flex items-baseline gap-[7px] text-[12px] text-muted mobile:text-[13px]">
           <span class="rebate-provider grid shrink-0 gap-1.5">
-            <span class="rebate-provider-name inline-flex items-center gap-[7px]"><span class="provider-dot meituan-dot inline-block size-1.5 shrink-0 self-center rounded-full bg-ink"></span>美团试吃官</span>
+            <span class="rebate-provider-name inline-flex items-center gap-[7px]"><span class="provider-dot inline-block size-1.5 shrink-0 self-center rounded-full" :class="match.meituan.provider === 'waimai' ? 'waimai-dot bg-muted' : 'meituan-dot bg-ink'"></span>{{ offerProviderName(match.meituan) }}</span>
             <span class="rebate-inventory pl-[13px] text-[11px]">{{ match.meituan.inventory === undefined ? '名额待核验' : `剩 ${match.meituan.inventory} 份` }}</span>
           </span>
           <strong class="ml-auto text-right text-[12px] font-medium text-ink mobile:text-[13px]">{{ ruleLabel(match.meituan.rule) }}</strong>
         </div>
         <div v-if="match.meituan.reviewBonus" class="flex items-baseline gap-[7px] text-[12px] text-muted mobile:text-[13px]">
-          <span class="provider-dot meituan-dot inline-block size-1.5 shrink-0 self-center rounded-full bg-ink"></span><span>美团评价</span>
+          <span class="provider-dot inline-block size-1.5 shrink-0 self-center rounded-full" :class="match.meituan.provider === 'waimai' ? 'waimai-dot bg-muted' : 'meituan-dot bg-ink'"></span><span>{{ providerShortNames[match.meituan.provider] }}评价</span>
           <strong class="ml-auto text-right text-[12px] font-medium text-ink mobile:text-[13px]">{{ reviewBonusLabel(match.meituan.reviewBonus) }}</strong>
         </div>
       </div>
