@@ -1,3 +1,5 @@
+import { logEvent, logOperation, withLogContext } from "./runtime-logs";
+import { randomUUID } from "node:crypto";
 import { createError } from "h3";
 import type { Offer } from "../../shared/types";
 import { xiaochanAdvanceWindow } from "../../shared/utils/xiaochan-advance-time";
@@ -187,7 +189,11 @@ export function armXiaochanSchedules(id: string, session: LocalSession) {
           return;
         }
         try {
-          await runXiaochanSchedule(current, schedule.offerId, { persist: () => saveSession(id, current) });
+          await logOperation({ sessionId: id, traceId: randomUUID(), action: "enroll", provider: "xiaochan", source: "schedule", scheduledAt: runAt }, async () => {
+            await runXiaochanSchedule(current, schedule.offerId, { persist: () => saveSession(id, current) });
+            const failed = current.xiaochanSchedules?.[schedule.offerId];
+            return { errors: failed?.state === "failed" ? [failed.message || "预约报名失败"] : [] };
+          });
         } catch {
           const failed = current.xiaochanSchedules?.[schedule.offerId];
           if (failed) {
@@ -207,18 +213,24 @@ export async function restoreXiaochanSchedules() {
   for (const id of await storedSessionIds()) {
     await withSessionLock(id, async () => {
       const session = await loadSession(id);
-      let changed = false;
+      let changed = false, interrupted = false;
+      const restored = Object.values(session.xiaochanSchedules || {}).some(schedule => schedule.state === "scheduled");
       for (const schedule of Object.values(session.xiaochanSchedules || {})) {
         if (schedule.state !== "running") continue;
         if (session.xiaochanEnrollments?.[schedule.offerId]?.state === "enrolled")
           delete session.xiaochanSchedules![schedule.offerId];
         else {
+          interrupted = true;
           schedule.state = "failed";
           schedule.message = session.xiaochanEnrollments?.[schedule.offerId] ? "报名待确认" : "预约报名已中断";
         }
         changed = true;
       }
       if (changed) await saveSession(id, session);
+      if (interrupted || restored) {
+        withLogContext({ sessionId: id, traceId: randomUUID(), action: "schedule", source: "system", provider: "xiaochan" }, () =>
+          logEvent({ event: "schedule.restored", outcome: interrupted ? "failure" : "success", ...(interrupted ? { reason: "interrupted" } : {}) }));
+      }
       armXiaochanSchedules(id, session);
     }).catch(() => {});
   }

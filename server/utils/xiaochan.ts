@@ -1,3 +1,4 @@
+import { loggedRequest } from "./runtime-logs";
 import { createError } from "h3";
 import type { LocationSettings, Offer, SyncScope } from "../../shared/types";
 import { safeUrl } from "../../shared/utils/import";
@@ -146,90 +147,95 @@ async function fetchXiaochanPage(
     ...(headers["x-platform"] === "Android" ? {} : { xweb_xhr: headers.xweb_xhr || "1" }),
     "content-type": "application/json",
   };
-  let response: Response;
-  try {
-    response = await fetch(endpoint, {
-      method: "POST",
-      headers: outgoing,
-      redirect: "error",
-      signal: AbortSignal.timeout(15_000),
-      body: JSON.stringify({
-        silk_id: Number(identity),
-        lon: location.longitude,
-        lat: location.latitude,
-        number: 20,
-        offset,
-        sort: 0,
-        scene: 1,
-        is_show_mt: true,
-        ...(headers["x-platform"] === "Android" ? {} : { app_id: 20 }),
-        ...(pagePvId ? { page_pv_id: pagePvId } : {}),
-      }),
-    });
-  } catch {
-    throw createError({
-      statusCode: 502,
-      statusMessage: "小蚕连接超时或网络异常，请稍后重试",
-    });
-  }
-  if (!response.ok) {
-    const gatewayBlocked = await isXiaochanGatewayBlock(response);
-    throw createError({
-      statusCode: response.status === 401 ? 401 : 502,
-      statusMessage:
-        response.status === 401
+  return loggedRequest({ provider: "xiaochan", endpoint, method: "POST", rpc: `${service}.${method}`,
+    client: headers["x-platform"] as "mini" | "Android", clientVersion: headers["x-version"] }, async log => {
+    let response: Response;
+    try {
+      response = await fetch(endpoint, {
+        method: "POST",
+        headers: outgoing,
+        redirect: "error",
+        signal: AbortSignal.timeout(15_000),
+        body: JSON.stringify({
+          silk_id: Number(identity),
+          lon: location.longitude,
+          lat: location.latitude,
+          number: 20,
+          offset,
+          sort: 0,
+          scene: 1,
+          is_show_mt: true,
+          ...(headers["x-platform"] === "Android" ? {} : { app_id: 20 }),
+          ...(pagePvId ? { page_pv_id: pagePvId } : {}),
+        }),
+      });
+    } catch (error) {
+      log.failure(error);
+      throw createError({
+        statusCode: 502,
+        statusMessage: "小蚕连接超时或网络异常，请稍后重试",
+      });
+    }
+    log.response(response.status, response.headers.get("content-type"), response.headers.get("retry-after"));
+    if (!response.ok) {
+      const gatewayBlocked = await isXiaochanGatewayBlock(response);
+      throw createError({
+        statusCode: response.status === 401 ? 401 : 502,
+        statusMessage:
+          response.status === 401
+            ? "小蚕登录已失效，请重新登录"
+            : gatewayBlocked
+              ? "小蚕请求被拦截，请稍后重试"
+              : response.status === 403
+                ? "小蚕拒绝同步请求"
+                : response.status === 429
+                  ? "小蚕请求频繁，请稍后重试"
+                  : `小蚕返回 HTTP ${response.status}`,
+      });
+    }
+    let data: any;
+    try {
+      data = await response.json();
+    } catch {
+      throw createError({
+        statusCode: 502,
+        statusMessage: "小蚕返回内容异常，请稍后重试",
+      });
+    }
+    const status = data?.status;
+    log.business(status?.code);
+    if (!status || !/^\d+$/.test(String(status.code)))
+      throw createError({
+        statusCode: 502,
+        statusMessage: "小蚕返回内容异常，请稍后重试",
+      });
+    if (Number(status.code) !== 0) {
+      const message = typeof status.msg === "string" ? status.msg : "";
+      const expired =
+        Number(status.code) === 401 ||
+        /未登录|登录(?:已)?(?:过期|失效)|会话(?:已)?(?:过期|失效)|(?:token.{0,8}expired)|unauthenticated|not logged in/i.test(
+          message,
+        );
+      throw createError({
+        statusCode: expired ? 401 : 502,
+        statusMessage: expired
           ? "小蚕登录已失效，请重新登录"
-          : gatewayBlocked
-            ? "小蚕请求被拦截，请稍后重试"
-            : response.status === 403
-              ? "小蚕拒绝同步请求"
-              : response.status === 429
-                ? "小蚕请求频繁，请稍后重试"
-                : `小蚕返回 HTTP ${response.status}`,
-    });
-  }
-  let data: any;
-  try {
-    data = await response.json();
-  } catch {
-    throw createError({
-      statusCode: 502,
-      statusMessage: "小蚕返回内容异常，请稍后重试",
-    });
-  }
-  const status = data?.status;
-  if (!status || !/^\d+$/.test(String(status.code)))
-    throw createError({
-      statusCode: 502,
-      statusMessage: "小蚕返回内容异常，请稍后重试",
-    });
-  if (Number(status.code) !== 0) {
-    const message = typeof status.msg === "string" ? status.msg : "";
-    const expired =
-      Number(status.code) === 401 ||
-      /未登录|登录(?:已)?(?:过期|失效)|会话(?:已)?(?:过期|失效)|(?:token.{0,8}expired)|unauthenticated|not logged in/i.test(
-        message,
-      );
-    throw createError({
-      statusCode: expired ? 401 : 502,
-      statusMessage: expired
-        ? "小蚕登录已失效，请重新登录"
-        : /签名|signature|x-ashe|x-nami/i.test(message)
-          ? "小蚕请求校验失败，请重新登录"
-          : Number(status.code) === 429
-            ? "小蚕请求频繁，请稍后重试"
-            : "小蚕活动请求失败，请稍后重试",
-    });
-  }
-  const rows = xiaochanRows(data);
-  const offers = normalizeXiaochan({
-    feed_items: scope
-      ? rows.filter((row) => {
-          const distance = Number(row.distance);
-          return row.distance != null && Number.isFinite(distance) &&
-            distance >= 0 && distance <= scope.radiusMeters;
-        })
-      : rows,
+          : /签名|signature|x-ashe|x-nami/i.test(message)
+            ? "小蚕请求校验失败，请重新登录"
+            : Number(status.code) === 429
+              ? "小蚕请求频繁，请稍后重试"
+              : "小蚕活动请求失败，请稍后重试",
+      });
+    }
+    const rows = xiaochanRows(data);
+    const offers = normalizeXiaochan({
+      feed_items: scope
+        ? rows.filter((row) => {
+            const distance = Number(row.distance);
+            return row.distance != null && Number.isFinite(distance) &&
+              distance >= 0 && distance <= scope.radiusMeters;
+          })
+        : rows,
   });
   return {
     offers,
@@ -239,6 +245,7 @@ async function fetchXiaochanPage(
       ? data.next_pv_id
       : rows.findLast((row: any) => typeof row.page_pv_id === "string" && row.page_pv_id)?.page_pv_id,
   };
+  });
 }
 
 export async function fetchXiaochan(

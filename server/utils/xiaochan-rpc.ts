@@ -1,3 +1,4 @@
+import { loggedRequest } from "./runtime-logs";
 import { createHash, randomUUID } from "node:crypto";
 import { createError } from "h3";
 import type { LocationSettings } from "../../shared/types";
@@ -184,53 +185,59 @@ export async function xiaochanRpc(
   request: XiaochanRpcRequest,
   fetcher: typeof fetch = fetch,
 ): Promise<Record<string, any>> {
-  let response: Response;
-  try {
-    // /g/pa is the App bootstrap endpoint; business RPCs use /rpc.
-    response = await fetcher("https://gw.xiaocantech.com/rpc", {
-      method: "POST",
-      headers: xiaochanRequestHeaders(request.headers, request.serverName, request.methodName, request.location),
-      body: JSON.stringify(request.headers["x-platform"] === "mini"
-        ? { ...request.body, app_id: 20 } : request.body),
-      redirect: "error",
-      signal: AbortSignal.timeout(15_000),
-    });
-  } catch {
-    throw rpcError(502, "小蚕连接超时或网络异常，请稍后重试", false);
-  }
-  if (!response.ok) {
-    const gatewayBlocked = await isXiaochanGatewayBlock(response);
-    throw rpcError(
-      response.status === 401 ? 401 : response.status === 429 ? 429 : 502,
-      response.status === 401 ? "小蚕登录已失效，请重新登录"
-        : response.status === 429 ? "小蚕请求频繁，请稍后重试"
-          : gatewayBlocked ? "小蚕请求被拦截，请稍后重试"
-            : "小蚕请求失败，请稍后重试",
-      response.status >= 400 && response.status < 500,
-      gatewayBlocked,
-    );
-  }
-  let data: any;
-  try {
-    data = await response.json();
-  } catch {
-    throw rpcError(502, "小蚕返回内容异常，请稍后重试", false);
-  }
-  if (!data || !data.status || !/^\d+$/.test(String(data.status.code)))
-    throw rpcError(502, "小蚕返回内容异常，请稍后重试", false);
-  if (Number(data.status.code) !== 0) {
-    const message = typeof data.status.msg === "string" ? data.status.msg : "";
-    const expired = Number(data.status.code) === 401 ||
-      /未登录|登录(?:已)?(?:过期|失效)|会话(?:已)?(?:过期|失效)|token.{0,8}expired|unauthenticated|not logged in/i.test(message);
-    const captcha = Number(data.status.code) === 200001 || /人机|滑块|captcha|ticket|安全验证/i.test(message);
-    throw rpcError(
-      expired ? 401 : captcha ? 422 : Number(data.status.code) === 429 ? 429 : 400,
-      expired ? "小蚕登录已失效，请重新登录"
-        : captcha ? "请在小蚕完成安全验证后重试"
-          : Number(data.status.code) === 429 ? "小蚕请求频繁，请稍后重试"
-            : "小蚕操作失败，请检查账号或活动状态",
-      true,
-    );
-  }
-  return data;
+  return loggedRequest({ provider: "xiaochan", endpoint: "https://gw.xiaocantech.com/rpc", method: "POST",
+    rpc: `${request.serverName}.${request.methodName}`, client: request.headers["x-platform"] as "mini" | "Android", clientVersion: request.headers["x-version"] }, async log => {
+    let response: Response;
+    try {
+      // /g/pa is the App bootstrap endpoint; business RPCs use /rpc.
+      response = await fetcher("https://gw.xiaocantech.com/rpc", {
+        method: "POST",
+        headers: xiaochanRequestHeaders(request.headers, request.serverName, request.methodName, request.location),
+        body: JSON.stringify(request.headers["x-platform"] === "mini"
+          ? { ...request.body, app_id: 20 } : request.body),
+        redirect: "error",
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch (error) {
+      log.failure(error);
+      throw rpcError(502, "小蚕连接超时或网络异常，请稍后重试", false);
+    }
+    log.response(response.status, response.headers.get("content-type"), response.headers.get("retry-after"));
+    if (!response.ok) {
+      const gatewayBlocked = await isXiaochanGatewayBlock(response);
+      throw rpcError(
+        response.status === 401 ? 401 : response.status === 429 ? 429 : 502,
+        response.status === 401 ? "小蚕登录已失效，请重新登录"
+          : response.status === 429 ? "小蚕请求频繁，请稍后重试"
+            : gatewayBlocked ? "小蚕请求被拦截，请稍后重试"
+              : "小蚕请求失败，请稍后重试",
+        response.status >= 400 && response.status < 500,
+        gatewayBlocked,
+      );
+    }
+    let data: any;
+    try {
+      data = await response.json();
+    } catch {
+      throw rpcError(502, "小蚕返回内容异常，请稍后重试", false);
+    }
+    log.business(data?.status?.code);
+    if (!data || !data.status || !/^\d+$/.test(String(data.status.code)))
+      throw rpcError(502, "小蚕返回内容异常，请稍后重试", false);
+    if (Number(data.status.code) !== 0) {
+      const message = typeof data.status.msg === "string" ? data.status.msg : "";
+      const expired = Number(data.status.code) === 401 ||
+        /未登录|登录(?:已)?(?:过期|失效)|会话(?:已)?(?:过期|失效)|token.{0,8}expired|unauthenticated|not logged in/i.test(message);
+      const captcha = Number(data.status.code) === 200001 || /人机|滑块|captcha|ticket|安全验证/i.test(message);
+      throw rpcError(
+        expired ? 401 : captcha ? 422 : Number(data.status.code) === 429 ? 429 : 400,
+        expired ? "小蚕登录已失效，请重新登录"
+          : captcha ? "请在小蚕完成安全验证后重试"
+            : Number(data.status.code) === 429 ? "小蚕请求频繁，请稍后重试"
+              : "小蚕操作失败，请检查账号或活动状态",
+        true,
+      );
+    }
+    return data;
+  });
 }

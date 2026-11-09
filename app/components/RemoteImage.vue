@@ -58,7 +58,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <img v-if="source && !failed" :key="version" ref="image" :src="source" :alt="alt"
+  <img class="size-full object-cover" v-if="source && !failed" :key="version" ref="image" :src="source" :alt="alt"
     :loading="loading" referrerpolicy="no-referrer" @error="onError" />
   <slot v-else />
 </template>

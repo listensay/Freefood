@@ -1,3 +1,5 @@
+import { logEvent, logOperation, withLogContext } from "./runtime-logs";
+import { randomUUID } from "node:crypto";
 import { createError } from "h3";
 import { canScheduleEnrollment } from "../../shared/utils/enrollment-time";
 import { COMPARISON_RADIUS_METERS, offerWithinRadius } from "../../shared/utils/scope";
@@ -109,7 +111,11 @@ export function armWaimaiSchedules(id: string, session: LocalSession) {
           return;
         }
         try {
-          await runWaimaiSchedule(current, schedule.offerId, { persist: () => saveSession(id, current) });
+          await logOperation({ sessionId: id, traceId: randomUUID(), action: "enroll", provider: "waimai", source: "schedule", scheduledAt: runAt }, async () => {
+            await runWaimaiSchedule(current, schedule.offerId, { persist: () => saveSession(id, current) });
+            const failed = current.waimaiSchedules?.[schedule.offerId];
+            return { errors: failed?.state === "failed" ? [failed.message || "预约报名失败"] : [] };
+          });
         } catch {
           const failed = current.waimaiSchedules?.[schedule.offerId];
           if (failed) {
@@ -129,18 +135,24 @@ export async function restoreWaimaiSchedules() {
   for (const id of await storedSessionIds()) {
     await withSessionLock(id, async () => {
       const session = await loadSession(id);
-      let changed = false;
+      let changed = false, interrupted = false;
+      const restored = Object.values(session.waimaiSchedules || {}).some(schedule => schedule.state === "scheduled");
       for (const schedule of Object.values(session.waimaiSchedules || {})) {
         if (schedule.state !== "running") continue;
         if (session.waimaiEnrollments?.[schedule.offerId]?.state === "enrolled")
           delete session.waimaiSchedules![schedule.offerId];
         else {
+          interrupted = true;
           schedule.state = "failed";
           schedule.message = session.waimaiEnrollments?.[schedule.offerId] ? "报名待确认" : "预约报名已中断";
         }
         changed = true;
       }
       if (changed) await saveSession(id, session);
+      if (interrupted || restored) {
+        withLogContext({ sessionId: id, traceId: randomUUID(), action: "schedule", source: "system", provider: "waimai" }, () =>
+          logEvent({ event: "schedule.restored", outcome: interrupted ? "failure" : "success", ...(interrupted ? { reason: "interrupted" } : {}) }));
+      }
       armWaimaiSchedules(id, session);
     }).catch(() => {});
   }

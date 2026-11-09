@@ -159,6 +159,7 @@ try {
     ["/", "叠个饭 · 霸王餐与试吃官同店比价", /7 公里内匹配活动/],
     ["/accounts", "账号管理 · 叠个饭", /连接电脑微信/],
     ["/guide", "使用指南 · 叠个饭", /连接账号后，在首页同步活动并报名小蚕活动。/],
+    ["/logs", "运行日志 · 叠个饭", /导出日志/],
   ] as const) {
     await test(`${path} renders its page and active navigation on direct access`, async () => {
       const response = await fetch(base + path);
@@ -171,7 +172,7 @@ try {
         assert.equal(await page.title(), title);
         assert.match(await page.locator("body").innerText(), content);
         const nav = page.getByRole("navigation", { name: "主导航" });
-        for (const target of ["/", "/accounts", "/guide"]) assert.equal(await nav.locator(`a[href="${target}"]`).count(), 1);
+        for (const target of ["/", "/accounts", "/guide", "/logs"]) assert.equal(await nav.locator(`a[href="${target}"]`).count(), 1);
         assert.equal(await nav.locator("a[aria-current='page']").count(), 1);
         assert.equal(await nav.locator("a[aria-current='page']").getAttribute("href"), path);
         if (path === "/accounts") assert.doesNotMatch(await page.locator("main").innerHTML(), /活动导入|同步活动|type="file"|xiaochan-phone|xiaochan-password|手机号登录|小程序会话导入|启用访客访问|waimai-token|打开登录页面|浏览器登录|meituan-session|请求头 JSON/);
@@ -514,18 +515,22 @@ try {
     const result = await pending;
     assert.equal(result.data.offers.waimai.length, 1);
   });
-  await test("Combination tabs only switch cached results, without starting or queuing syncs; manual and timed sync use the selected tab", async () => {
+  await test("Combined platform results share filters and sorting; all syncs ignore the old tab preference", async () => {
     const { chromium } = await import("playwright-core");
     const browser = await chromium.launch({ channel: "chrome", headless: true });
     try {
       for (const inFlight of [false, true]) {
         const context = await browser.newContext();
+        await context.addInitScript(provider => localStorage.setItem("food-bawangcan-provider", provider), inFlight ? "xiaochan" : "waimai");
         const page = await context.newPage();
         await page.clock.install();
         const collectedAt = new Date().toISOString();
-        const activity = { category: "美食", inventory: 3, distanceMeters: 1000, requirement: "无需评价",
-          source: "live", collectedAt, rule: { kind: "fixed", thresholdCents: 2000, cashbackCents: 1500 } };
-        const waimai = { ...activity, provider: "waimai", id: "waimai:store:sku", name: "歪麦测试（同一分店）" };
+        const activity = { name: "双平台测试（同一分店）", category: "美食", inventory: 3,
+          distanceMeters: 2000, requirement: "无需评价", source: "live", collectedAt,
+          rule: { kind: "fixed", thresholdCents: 2000, cashbackCents: 1500 } };
+        const xiaochan = { ...activity, provider: "xiaochan", id: "xiaochan:42" };
+        const waimai = { ...activity, provider: "waimai", id: "waimai:store:sku", distanceMeters: 1000,
+          requirement: "需要评价", rule: { kind: "fixed", thresholdCents: 3000, cashbackCents: 1000 } };
         const dashboard: any = {
           location: { label: "南宁", cityName: "南宁市", cityCode: 450103, latitude: 22.82, longitude: 108.36 },
           connections: {
@@ -533,15 +538,16 @@ try {
             waimai: { state: "connected", label: "已登录", profile: { userId: "2" } },
             meituan: { state: "disconnected", label: "未连接" },
           },
-          offers: { xiaochan: [], waimai: [waimai], meituan: [{ ...waimai, provider: "meituan", id: "meituan:1" }] },
-          updatedAt: {}, enrollmentSchedules: [],
+          offers: { xiaochan: [xiaochan], waimai: [waimai], meituan: [{ ...activity, provider: "meituan", id: "meituan:1",
+            rule: { kind: "fixed", thresholdCents: 2000, cashbackCents: 500 } }] },
+          updatedAt: { xiaochan: "2026-11-07T02:00:00Z", waimai: "2026-11-07T03:00:00Z", meituan: "2026-11-07T01:00:00Z" },
+          enrollmentSchedules: [],
         };
-        const requested: string[] = [];
+        const requested: unknown[] = [];
         let completeFirst: (() => Promise<void>) | undefined;
         await page.route("**/api/**", async route => {
           if (route.request().url().endsWith("/api/sync")) {
-            const { provider } = route.request().postDataJSON();
-            requested.push(provider);
+            requested.push(route.request().postDataJSON());
             if (inFlight && requested.length === 1) {
               completeFirst = () => route.fulfill({ json: { data: dashboard, errors: [], message: "同步完成" } });
               return;
@@ -552,36 +558,110 @@ try {
         const firstRequest = page.waitForRequest(request => request.url().endsWith("/api/sync"));
         await page.goto(base);
         await firstRequest;
-        if (!inFlight) await page.waitForFunction(() => !document.querySelector(".sync-button")?.textContent?.includes("正在同步"));
-        await page.getByRole("button", { name: "歪麦", exact: true }).click();
-        await page.locator(".store-card").waitFor();
+        await page.waitForFunction(() => document.querySelectorAll(".store-card").length === 2);
+        assert.equal(await page.locator(".combination-tabs").count(), 0);
+        for (const name of ["小蚕", "歪麦"]) assert.equal(await page.getByRole("button", { name, exact: true }).count(), 0);
+        const badges = page.locator(".store-card .provider-badge");
+        assert.deepEqual(await badges.allTextContents(), ["小蚕", "歪麦"]);
+        assert.deepEqual(await page.locator(".store-card h3").allTextContents(), [activity.name, activity.name], "The same store must keep its two platform offers separate");
+        assert.equal(await page.locator(".store-card .activity-variant").count(), 2);
+        assert.deepEqual(await page.locator(".net-price > strong").allTextContents(), ["¥0.00", "¥15.00"], "Rebates must not be stacked across all three platforms");
+        assert.equal(await page.locator(".results-title h2 span").innerText(), "2");
+        assert.equal(await page.locator(".updated-at").innerText(), "最近同步 11:00");
+        assert.equal(await page.locator(".store-card .match-status").count(), 0);
+        assert.doesNotMatch((await page.locator(".store-card").allTextContents()).join(""), /分店待核验/);
+        for (const name of ["支出 ≤ ¥5", "双方无需评价"]) {
+          await page.getByRole("button", { name, exact: true }).click();
+          assert.deepEqual(await badges.allTextContents(), ["小蚕"]);
+          assert.equal(await page.locator(".results-title h2 span").innerText(), "1");
+          await page.getByRole("button", { name: "全部", exact: true }).click();
+        }
+        for (const [name, expected] of [["距离升序", ["歪麦", "小蚕"]], ["返现降序", ["小蚕", "歪麦"]], ["支出升序", ["小蚕", "歪麦"]]] as const) {
+          await page.getByRole("combobox", { name: "结果排序" }).click();
+          await page.getByRole("option", { name, exact: true }).click();
+          assert.deepEqual(await badges.allTextContents(), [...expected]);
+        }
         await page.clock.runFor(100);
-        assert.deepEqual(requested, ["xiaochan"]);
-        assert.equal(await page.evaluate(() => localStorage.getItem("food-bawangcan-provider")), "waimai");
-        assert.equal(await page.getByRole("button", { name: "歪麦", exact: true }).getAttribute("aria-pressed"), "true");
+        assert.deepEqual(requested, [{ automatic: true }], "Filtering and sorting must not start or queue syncs");
         if (inFlight) {
           assert.match(await page.locator(".sync-button").innerText(), /正在同步/);
           await completeFirst!();
         }
         await page.waitForFunction(() => !document.querySelector(".sync-button")?.textContent?.includes("正在同步"));
-        await page.getByRole("button", { name: "歪麦", exact: true }).click();
-        await page.getByRole("button", { name: "小蚕", exact: true }).click();
-        await page.getByRole("button", { name: "歪麦", exact: true }).click();
+        if (!inFlight && process.env.FOOD_UI_SCREENSHOTS) await page.screenshot({ path: "/tmp/food-combined-desktop.png" });
+        await page.setViewportSize({ width: 375, height: 812 });
         await page.clock.runFor(100);
-        assert.deepEqual(requested, ["xiaochan"]);
-        assert.equal(await page.locator(".store-card h3").innerText(), waimai.name);
-        assert.equal(await page.locator(".store-card .match-status").count(), 0);
-        assert.doesNotMatch(await page.locator(".store-card").innerText(), /分店待核验/);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+        for (const badge of await badges.all()) {
+          const bounds = await badge.boundingBox();
+          assert.ok(bounds && bounds.width > 0 && bounds.x >= 0 && bounds.x + bounds.width <= 375);
+        }
+        if (!inFlight && process.env.FOOD_UI_SCREENSHOTS) await page.screenshot({ path: "/tmp/food-combined-mobile.png", fullPage: true });
         const manualSync = page.waitForResponse(response => response.url().endsWith("/api/sync"));
         await page.getByRole("button", { name: "同步活动", exact: true }).click();
         await manualSync;
         await page.waitForFunction(() => !document.querySelector(".sync-button")?.textContent?.includes("正在同步"));
-        assert.deepEqual(requested, ["xiaochan", "waimai"]);
+        assert.deepEqual(requested, [{ automatic: true }, { automatic: false }]);
         const timedSync = page.waitForResponse(response => response.url().endsWith("/api/sync"));
         await page.clock.fastForward(5 * 60_000);
         await timedSync;
-        assert.deepEqual(requested, ["xiaochan", "waimai", "waimai"]);
+        assert.deepEqual(requested, [{ automatic: true }, { automatic: false }, { automatic: true }]);
         await context.close();
+      }
+    } finally { await browser.close(); }
+  });
+  await test("Combined sync supports either connected platform and requires a city only for connected Waimai", async () => {
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ channel: "chrome", headless: true });
+    try {
+      for (const provider of ["xiaochan", "waimai"] as const) {
+        for (const cityName of ["南宁市", ""]) {
+          const context = await browser.newContext();
+          await context.addInitScript(() => localStorage.setItem("food-bawangcan-provider", "xiaochan"));
+          const page = await context.newPage();
+          await page.clock.install();
+          const dashboard: any = {
+            location: { label: "南宁", cityName, cityCode: 450103, latitude: 22.82, longitude: 108.36 },
+            connections: {
+              xiaochan: { state: "disconnected", label: "未连接" },
+              waimai: { state: "disconnected", label: "未连接" },
+              meituan: { state: "disconnected", label: "未连接" },
+            },
+            offers: { xiaochan: [], waimai: [], meituan: [] }, updatedAt: {}, enrollmentSchedules: [],
+          };
+          dashboard.connections[provider] = { state: "connected", label: "已登录", profile: { userId: "1" } };
+          const requested: unknown[] = [];
+          await page.route("**/api/**", async route => {
+            const path = new URL(route.request().url()).pathname;
+            if (path === "/api/sync") requested.push(route.request().postDataJSON());
+            if (path === "/api/location") dashboard.location = route.request().postDataJSON();
+            await route.fulfill({ json: path === "/api/sync" ? { data: dashboard, errors: [], message: "同步完成" } : dashboard });
+          });
+          await page.goto(base);
+          await page.waitForFunction(() => !(document.querySelector(".sync-button") as HTMLButtonElement)?.disabled);
+          const needsCity = provider === "waimai" && !cityName;
+          assert.deepEqual(requested, needsCity ? [] : [{ automatic: true }]);
+          await page.clock.fastForward(5 * 60_000);
+          await page.waitForFunction(() => !(document.querySelector(".sync-button") as HTMLButtonElement)?.disabled);
+          assert.deepEqual(requested, needsCity ? [] : [{ automatic: true }, { automatic: true }]);
+          await page.getByRole("button", { name: "同步活动", exact: true }).click();
+          const dialog = page.getByRole("dialog", { name: "收餐地址", exact: true });
+          if (needsCity) {
+            await dialog.waitFor();
+            assert.deepEqual(requested, []);
+            await dialog.getByRole("button", { name: "保存地址", exact: true }).click();
+            assert.equal(await dialog.getByRole("alert").innerText(), "请填写完整地址");
+            await dialog.getByLabel("城市名称").fill("南宁市");
+            await dialog.getByRole("button", { name: "保存地址", exact: true }).click();
+            await dialog.waitFor({ state: "hidden" });
+            await page.getByRole("button", { name: "同步活动", exact: true }).click();
+          }
+          await page.waitForFunction(() => !(document.querySelector(".sync-button") as HTMLButtonElement)?.disabled);
+          assert.deepEqual(requested, needsCity ? [{ automatic: false }] : [{ automatic: true }, { automatic: true }, { automatic: false }]);
+          await page.locator(".location-button").click();
+          assert.equal(await dialog.getByLabel("城市名称").evaluate((input: HTMLInputElement) => input.required), provider === "waimai");
+          await context.close();
+        }
       }
     } finally { await browser.close(); }
   });
@@ -814,6 +894,11 @@ try {
     assert.equal(result.offers.waimai[1].enrollment, undefined);
     assert.deepEqual(result.enrollmentSchedules, []);
     assert.equal(result.waimaiSchedules, undefined);
+    const logs = (await (await call("/api/logs/export", undefined, "GET", scheduledCookie)).json()).entries;
+    const execution = logs.filter((entry: any) => entry.action === "enroll" && entry.source === "schedule");
+    assert.equal(execution.filter((entry: any) => entry.event === "operation.end").length, 1);
+    assert.ok(execution.some((entry: any) => entry.event === "request.end" && entry.provider === "waimai"));
+    assert.ok(execution.every((entry: any) => entry.scheduledAt === runAt));
   });
   await test("Waimai mutation APIs enforce session and same-origin request guards", async () => {
     const c = await freshCookie();
@@ -1085,6 +1170,11 @@ try {
     assert.equal(result.offers.xiaochan[0].enrollment.state, "enrolled");
     assert.equal(result.offers.xiaochan[1].enrollment, undefined);
     assert.deepEqual(result.enrollmentSchedules, []);
+    const logs = (await (await call("/api/logs/export", undefined, "GET", c)).json()).entries;
+    const execution = logs.filter((entry: any) => entry.action === "enroll" && entry.source === "schedule");
+    assert.equal(execution.filter((entry: any) => entry.event === "operation.end").length, 1);
+    assert.ok(execution.some((entry: any) => entry.event === "request.end" && entry.provider === "xiaochan"));
+    assert.ok(execution.every((entry: any) => entry.scheduledAt === runAt));
     assert.equal((await call("/api/xiaochan/schedule", { offerId: "xiaochan:42", runAt: new Date(Date.now() + 60_000).toISOString() }, "POST", c)).status, 409);
   });
   await test("Schedule API rejects earlier times, other dates and activity-end boundaries", async () => {
@@ -1478,10 +1568,12 @@ try {
         await route.fulfill({ json: path === "/api/sync" ? { data: dashboard, errors: [], message: "同步完成" } : dashboard });
       });
       await page.goto(base);
-      await page.waitForFunction(() => document.querySelectorAll(".enrollment-button").length === 1 &&
+      await page.waitForFunction(() => document.querySelectorAll(".enrollment-button").length === 2 &&
         !document.querySelector(".sync-button")?.textContent?.includes("正在同步"));
-      assert.equal(await page.locator(".enrollment-button").isDisabled(), true, "Ordinary enrollment must remain closed before the official opening");
-      await page.locator(".schedule-enrollment-button").click();
+      const xiaochanCard = page.locator('.store-card[data-provider="xiaochan"]');
+      const waimaiCard = page.locator('.store-card[data-provider="waimai"]');
+      assert.equal(await xiaochanCard.locator(".enrollment-button").isDisabled(), true, "Ordinary enrollment must remain closed before the official opening");
+      await xiaochanCard.locator(".schedule-enrollment-button").click();
       const dialog = page.getByRole("dialog", { name: "预约报名", exact: true });
       const confirm = dialog.getByRole("button", { name: "确认预约", exact: true });
       const couponSwitch = dialog.getByRole("switch", { name: /使用超前抢单券/ });
@@ -1526,16 +1618,18 @@ try {
       assert.equal(optionsCalls, beforeToggle, "Toggling a coupon must not repeat the upstream lookup");
       await confirm.click();
       await page.locator(".scheduled-enrollments").waitFor();
+      assert.equal(await page.locator(".scheduled-enrollments .provider-badge").innerText(), "小蚕");
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
       assert.deepEqual(schedules.pop(), { path: "/api/xiaochan/schedule", body: {
         offerId: "xiaochan:42", runAt: "2026-11-07T13:00:00+08:00",
       } });
       await page.locator(".scheduled-enrollments").getByRole("button", { name: "取消预约", exact: true }).click();
       await page.locator(".scheduled-enrollments").waitFor({ state: "detached" });
       await page.setViewportSize({ width: 1280, height: 720 });
-      await page.locator(".schedule-enrollment-button").click();
+      await xiaochanCard.locator(".schedule-enrollment-button").click();
       await dialog.getByText("最早 12:30", { exact: true }).waitFor();
       await dialog.getByRole("button", { name: "关闭预约报名" }).click();
-      await page.locator(".schedule-enrollment-button").click();
+      await xiaochanCard.locator(".schedule-enrollment-button").click();
       await dialog.getByText("最早 12:30", { exact: true }).waitFor();
       assert.equal(await couponSwitch.isChecked(), true);
       await confirm.click();
@@ -1546,7 +1640,7 @@ try {
       await page.locator(".scheduled-enrollments").getByRole("button", { name: "取消预约", exact: true }).click();
       await page.locator(".scheduled-enrollments").waitFor({ state: "detached" });
 
-      await page.locator(".schedule-enrollment-button").click();
+      await xiaochanCard.locator(".schedule-enrollment-button").click();
       await dialog.getByText("最早 12:30", { exact: true }).waitFor();
       await page.clock.setFixedTime(new Date("2026-11-07T04:40:00Z"));
       await couponSwitch.waitFor({ state: "detached" });
@@ -1556,27 +1650,27 @@ try {
       await page.clock.setFixedTime(new Date("2026-11-07T04:00:00Z"));
 
       optionsMode = "empty";
-      await page.locator(".schedule-enrollment-button").click();
+      await xiaochanCard.locator(".schedule-enrollment-button").click();
       await dialog.getByText("查询卡券…", { exact: true }).waitFor({ state: "detached" });
       assert.equal((await dialog.getByRole("combobox", { name: "报名小时" }).innerText()).trim(), "13");
       assert.equal((await dialog.getByRole("combobox", { name: "报名分钟" }).innerText()).trim(), "00");
       assert.equal(await dialog.getByText("使用超前抢单券", { exact: true }).count(), 0);
       await dialog.getByRole("button", { name: "关闭预约报名" }).click();
       optionsMode = "fail";
-      await page.locator(".schedule-enrollment-button").click();
+      await xiaochanCard.locator(".schedule-enrollment-button").click();
       await dialog.getByRole("alert").waitFor();
       assert.equal((await dialog.getByRole("combobox", { name: "报名小时" }).innerText()).trim(), "13");
       assert.equal(await confirm.isEnabled(), true, "Failed coupon lookup must retain ordinary scheduling");
       await dialog.getByRole("button", { name: "关闭预约报名" }).click();
 
       const beforeWaimai = optionsCalls;
-      await page.getByRole("button", { name: "歪麦", exact: true }).click();
-      await page.locator(".schedule-enrollment-button").click();
+      await waimaiCard.locator(".schedule-enrollment-button").click();
       assert.equal((await dialog.getByRole("combobox", { name: "报名小时" }).innerText()).trim(), "13");
       assert.equal(await dialog.getByText("使用超前抢单券", { exact: true }).count(), 0);
       await confirm.click();
       await page.locator(".scheduled-enrollments").waitFor();
       assert.equal(optionsCalls, beforeWaimai);
+      assert.equal(await page.locator(".scheduled-enrollments .provider-badge").innerText(), "歪麦");
       assert.deepEqual(schedules.at(-1), { path: "/api/waimai/schedule", body: {
         offerId: "waimai:101:202", runAt: "2026-11-07T13:00:00+08:00",
       } });
@@ -1657,77 +1751,72 @@ try {
         await route.fulfill({ json: path === "/api/sync" ? { data: dashboard, errors: [], message: "同步完成" } : dashboard });
       });
       await page.goto(base);
-      await page.waitForFunction(() => document.querySelectorAll(".enrollment-button").length === 1 &&
+      await page.waitForFunction(() => document.querySelectorAll(".enrollment-button").length === 2 &&
         !document.querySelector(".sync-button")?.textContent?.includes("正在同步"));
-      const button = page.locator(".enrollment-button");
+      const xiaochanCard = page.locator('.store-card[data-provider="xiaochan"]');
+      const waimaiCard = page.locator('.store-card[data-provider="waimai"]');
+      const xiaochanButton = xiaochanCard.locator(".enrollment-button");
+      const button = waimaiCard.locator(".enrollment-button");
       const xiaochanStarted = new Promise<void>(resolve => enrollmentStarted.set("xiaochan:42", resolve));
-      await button.click();
+      await xiaochanButton.click();
       await xiaochanStarted;
-      await page.getByRole("button", { name: "歪麦", exact: true }).click();
       assert.equal(await button.count(), 1, "Unsupported and stale Waimai activities must not expose enrollment controls");
       assert.equal(await button.isEnabled(), true, "A pending Xiaochan request must not disable Waimai enrollment");
       const waimaiStarted = new Promise<void>(resolve => enrollmentStarted.set("waimai:101:202", resolve));
       await button.click();
       await waimaiStarted;
       await pending.get("waimai:101:202")!();
-      await page.waitForFunction(() => document.querySelector(".enrollment-button")?.textContent === "已报名");
+      await page.waitForFunction(() => document.querySelector('.store-card[data-provider="waimai"] .enrollment-button')?.textContent === "已报名");
       await pending.get("xiaochan:42")!();
-      await page.getByRole("button", { name: "小蚕", exact: true }).click();
-      await page.waitForFunction(() => document.querySelector(".enrollment-button")?.textContent === "已报名");
-      await page.getByRole("button", { name: "歪麦", exact: true }).click();
+      await page.waitForFunction(() => document.querySelector('.store-card[data-provider="xiaochan"] .enrollment-button')?.textContent === "已报名");
       assert.equal(await button.textContent(), "已报名", "The older Xiaochan dashboard must not revert Waimai's result");
       assert.deepEqual(requests.map(row => row.path), ["/api/xiaochan/enroll", "/api/waimai/enroll"]);
 
       page.once("dialog", dialog => dialog.dismiss());
-      await page.locator(".cancel-enrollment-button").click();
+      await waimaiCard.locator(".cancel-enrollment-button").click();
       assert.equal(requests.length, 2, "Dismissing confirmation must not cancel enrollment");
       assert.equal(await button.textContent(), "已报名");
       page.once("dialog", dialog => dialog.accept());
-      await page.locator(".cancel-enrollment-button").click();
-      await page.waitForFunction(() => document.querySelector(".enrollment-button")?.textContent === "报名");
+      await waimaiCard.locator(".cancel-enrollment-button").click();
+      await page.waitForFunction(() => document.querySelector('.store-card[data-provider="waimai"] .enrollment-button')?.textContent === "报名");
       assert.deepEqual(requests.at(-1), { path: "/api/waimai/cancel", method: "POST", offerId: "waimai:101:202" });
 
-      await page.locator(".schedule-enrollment-button").click();
+      await waimaiCard.locator(".schedule-enrollment-button").click();
       await page.getByRole("dialog", { name: "预约报名", exact: true }).waitFor();
       await page.getByRole("button", { name: "确认预约", exact: true }).click();
       await page.locator(".scheduled-enrollments").waitFor();
       assert.equal(await button.isDisabled(), true);
       assert.deepEqual(requests.at(-1), { path: "/api/waimai/schedule", method: "POST", offerId: "waimai:101:202" });
-      await page.getByRole("button", { name: "小蚕", exact: true }).click();
-      assert.equal(await button.textContent(), "已报名");
+      assert.equal(await xiaochanButton.textContent(), "已报名");
       await page.locator(".scheduled-enrollments").getByRole("button", { name: "取消预约", exact: true }).click();
       await page.locator(".scheduled-enrollments").waitFor({ state: "detached" });
       assert.deepEqual(requests.at(-1), { path: "/api/waimai/schedule", method: "DELETE", offerId: "waimai:101:202" });
-      assert.equal(await button.textContent(), "已报名", "Cancelling a Waimai task from another tab must preserve Xiaochan enrollment");
+      assert.equal(await xiaochanButton.textContent(), "已报名", "Cancelling a Waimai task must preserve Xiaochan enrollment");
 
-      await page.getByRole("button", { name: "歪麦", exact: true }).click();
       assert.equal(await button.isEnabled(), true);
-      await page.locator(".schedule-enrollment-button").click();
+      await waimaiCard.locator(".schedule-enrollment-button").click();
       await page.getByRole("button", { name: "确认预约", exact: true }).click();
       await page.locator(".scheduled-enrollments").waitFor();
       dashboard.enrollmentSchedules = [];
       delete dashboard.offers.waimai[0].enrollmentSchedule;
       dashboard.offers.waimai[0].enrollment = { state: "enrolled", orderId: "waimai-scheduled-order" };
-      await page.waitForFunction(() => document.querySelector(".enrollment-button")?.textContent === "已报名");
+      await page.waitForFunction(() => document.querySelector('.store-card[data-provider="waimai"] .enrollment-button')?.textContent === "已报名");
       assert.equal(await page.locator(".notice").innerText(), "预约报名成功");
       assert.equal(await page.locator(".scheduled-enrollments").count(), 0);
-      await page.getByRole("button", { name: "小蚕", exact: true }).click();
-      assert.equal(await button.textContent(), "已报名");
+      assert.equal(await xiaochanButton.textContent(), "已报名");
       assert.equal(requests.filter(row => row.path.endsWith("/enroll")).length, 2);
 
       dashboard.offers.waimai[0].enrollment = { state: "unknown", orderId: "waimai-wait-payment-order" };
-      await page.getByRole("button", { name: "歪麦", exact: true }).click();
       await page.locator(".sync-button").click();
-      await page.waitForFunction(() => document.querySelector(".enrollment-button")?.textContent === "查看报名");
+      await page.waitForFunction(() => document.querySelector('.store-card[data-provider="waimai"] .enrollment-button')?.textContent === "查看报名");
       assert.equal(await button.isEnabled(), true, "An uncertain order must retain its enrollment lookup action");
-      assert.equal(await page.locator(".cancel-enrollment-button").isVisible(), true);
+      assert.equal(await waimaiCard.locator(".cancel-enrollment-button").isVisible(), true);
       page.once("dialog", dialog => dialog.accept());
-      await page.locator(".cancel-enrollment-button").click();
-      await page.waitForFunction(() => document.querySelector(".enrollment-button")?.textContent === "报名");
+      await waimaiCard.locator(".cancel-enrollment-button").click();
+      await page.waitForFunction(() => document.querySelector('.store-card[data-provider="waimai"] .enrollment-button')?.textContent === "报名");
       assert.deepEqual(requests.at(-1), { path: "/api/waimai/cancel", method: "POST", offerId: "waimai:101:202" });
       assert.equal(requests.filter(row => row.path.endsWith("/enroll")).length, 2, "Cancelling an uncertain saved order must not submit another enrollment");
-      await page.getByRole("button", { name: "小蚕", exact: true }).click();
-      assert.equal(await button.textContent(), "已报名");
+      assert.equal(await xiaochanButton.textContent(), "已报名");
     } finally {
       await browser.close();
     }

@@ -29,7 +29,7 @@ app.use(eventHandler(async event => {
   if (desktop || !["GET", "HEAD"].includes(event.method)) throw createError({ statusCode: 404 });
   let path: string;
   try { path = decodeURIComponent(event.path.split("?")[0]!); } catch { throw createError({ statusCode: 400 }); }
-  if (["/", "/accounts", "/guide"].includes(path)) path = "/index.html";
+  if (["/", "/accounts", "/guide", "/logs"].includes(path)) path = "/index.html";
   const file = resolve(root, "." + path);
   if (!file.startsWith(root + sep) || path.includes("\\") || path.includes("\0")) throw createError({ statusCode: 404 });
   try {

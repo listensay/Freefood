@@ -4,6 +4,10 @@ import { chmod, lstat, mkdir, readFile, readdir } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { createError } from "h3";
 import { sessionEncryptionKey } from "./session-key";
+import type { LogQuery, RuntimeLog } from "../../shared/runtime-logs";
+
+export const LOG_RETENTION_DAYS = 14;
+export const MAX_LOG_ENTRIES = 20_000;
 
 const validId = (id: string) => /^[a-f0-9]{64}$/.test(id);
 const storageError = () => createError({ statusCode: 500, statusMessage: "本地数据读取失败，请检查数据库和密钥" });
@@ -37,6 +41,11 @@ export class SessionDatabase {
       try {
         db.exec(`CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY NOT NULL, payload BLOB NOT NULL, updated_at INTEGER NOT NULL);
           CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS runtime_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, timestamp INTEGER NOT NULL,
+            provider TEXT, level TEXT NOT NULL, reason TEXT, payload BLOB NOT NULL);
+          CREATE INDEX IF NOT EXISTS runtime_logs_session ON runtime_logs(session_id, id);
+          CREATE INDEX IF NOT EXISTS runtime_logs_time ON runtime_logs(timestamp);
           PRAGMA user_version=1;`);
         const check = store.meta("key_check");
         if (check) {
@@ -73,6 +82,45 @@ export class SessionDatabase {
     const payload = this.encode(id, value);
     this.db.prepare(`INSERT INTO sessions(id,payload,updated_at) VALUES(?,?,?)
       ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at`).run(id, payload, Date.now());
+  }
+  private pruneLogs(id: string, now = Date.now()) {
+    this.db.prepare("DELETE FROM runtime_logs WHERE timestamp < ?").run(now - LOG_RETENTION_DAYS * 86400_000);
+    this.db.prepare(`DELETE FROM runtime_logs WHERE session_id=? AND id <= COALESCE(
+      (SELECT id FROM runtime_logs WHERE session_id=? ORDER BY id DESC LIMIT 1 OFFSET ?), 0)`)
+      .run(id, id, MAX_LOG_ENTRIES);
+  }
+  appendLog(id: string, log: Omit<RuntimeLog, "id">) {
+    if (!validId(id) || !/^[a-f0-9-]{36}$/.test(log.traceId) || !Number.isFinite(Date.parse(log.timestamp))) throw storageError();
+    const payload = this.encode(`log:${id}:${log.traceId}`, log);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("INSERT INTO runtime_logs(session_id,timestamp,provider,level,reason,payload) VALUES(?,?,?,?,?,?)")
+        .run(id, Date.parse(log.timestamp), log.provider || null, log.level, log.reason || null,
+          Buffer.concat([Buffer.from(log.traceId), payload]));
+      this.pruneLogs(id);
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+  queryLogs(id: string, query: LogQuery = {}, limit = 100) {
+    if (!validId(id)) throw storageError();
+    this.pruneLogs(id);
+    const conditions = ["session_id=?"], parameters: (string | number)[] = [id];
+    for (const key of ["provider", "level", "reason"] as const) if (query[key]) {
+      conditions.push(`${key}=?`); parameters.push(query[key]!);
+    }
+    const total = Number(this.db.prepare(`SELECT COUNT(*) AS count FROM runtime_logs WHERE ${conditions.join(" AND ")}`).get(...parameters)!.count);
+    if (query.before) { conditions.push("id < ?"); parameters.push(query.before); }
+    const rows = this.db.prepare(`SELECT id,payload FROM runtime_logs WHERE ${conditions.join(" AND ")} ORDER BY id DESC LIMIT ?`)
+      .all(...parameters, limit + 1);
+    const entries: RuntimeLog[] = rows.slice(0, limit).map(row => {
+      const payload = Buffer.from(row.payload as Uint8Array), traceId = payload.subarray(0, 36).toString();
+      return { ...this.decode(`log:${id}:${traceId}`, payload.subarray(36)), id: Number(row.id) };
+    });
+    return { entries, total, ...(rows.length > limit ? { nextCursor: entries.at(-1)!.id } : {}) };
+  }
+  clearLogs(id: string) {
+    if (!validId(id)) throw storageError();
+    this.db.prepare("DELETE FROM runtime_logs WHERE session_id=?").run(id);
   }
   ids(): string[] {
     return this.db.prepare("SELECT id FROM sessions ORDER BY id").all().map(row => String(row.id));
@@ -162,3 +210,5 @@ export function desktopSessionId() {
   return current.desktopId();
 }
 export function closeSessionDatabase() { current?.close(); current = undefined; pending = undefined; }
+
+export function currentSessionDatabase() { return current; }

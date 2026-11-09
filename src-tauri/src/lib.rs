@@ -100,6 +100,32 @@ async fn api_request(app: tauri::AppHandle, bridge: tauri::State<'_, Arc<Bridge>
     forward(app, bridge.inner().clone(), path, method, body, timeout_ms).await
 }
 
+#[tauri::command]
+async fn export_runtime_logs(app: tauri::AppHandle, bridge: tauri::State<'_, Arc<Bridge>>) -> Result<String, String> {
+    let response = forward(app.clone(), bridge.inner().clone(), "/api/logs/export".into(), "GET".into(), None, 30_000).await?;
+    if response.status != 200 { return Err("日志导出失败".into()); }
+    let directory = app.path().download_dir().map_err(|_| "下载文件夹不可用")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::Write;
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| "系统时间无效")?.as_secs();
+        let path = directory.join(format!("freefood-logs-{}-{:08x}.json", stamp, rand::random::<u32>()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)] {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path).map_err(|_| "日志文件创建失败")?;
+        if file.write_all(response.body.as_bytes()).and_then(|_| file.sync_all()).is_err() {
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err("日志文件保存失败".to_string());
+        }
+        let _ = tauri_plugin_opener::reveal_item_in_dir(&path);
+        Ok(path.to_string_lossy().into_owned())
+    }).await.map_err(|_| "日志导出失败".to_string())?
+}
+
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -136,7 +162,7 @@ pub fn run() {
             show_main_window(app);
         }))
         .plugin(tauri_plugin_opener::init())
-        .manage(bridge.clone()).invoke_handler(tauri::generate_handler![api_request])
+        .manage(bridge.clone()).invoke_handler(tauri::generate_handler![api_request, export_runtime_logs])
         .setup(|app| { setup_tray(app)?; Ok(()) })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event { api.prevent_close(); let _ = window.hide(); }

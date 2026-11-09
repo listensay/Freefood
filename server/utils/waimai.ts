@@ -1,3 +1,4 @@
+import { beginLoggedRequest } from "./runtime-logs";
 import {
   constants,
   createCipheriv,
@@ -100,11 +101,14 @@ function responseKey(encrypted: string, keyObject: KeyObject): string {
   return key.toString("ascii");
 }
 
+const responseLogs = new WeakMap<Response, ReturnType<typeof beginLoggedRequest>>();
+
 async function request(
   url: string,
   init: RequestInit,
   transport: typeof fetch,
 ) {
+  const log = beginLoggedRequest({ provider: "waimai", endpoint: url, method: "POST", client: "mini", clientVersion: "1.1.175" });
   let response: Response;
   try {
     response = await transport(url, {
@@ -113,15 +117,17 @@ async function request(
       redirect: "error",
       signal: AbortSignal.timeout(15_000),
     });
-  } catch {
+  } catch (error) {
+    log.end(error);
     throw createError({
       statusCode: 502,
       statusMessage: "歪麦连接超时或网络异常，请稍后重试",
       data: { waimaiOutcome: "unknown" },
     });
   }
-  if (!response.ok)
-    throw createError({
+  log.response(response.status, response.headers.get("content-type"), response.headers.get("retry-after"));
+  if (!response.ok) {
+    const error = createError({
       statusCode: response.status === 401 ? 401 : 502,
       data: { waimaiOutcome: [401, 403, 429].includes(response.status) ? "rejected" : "unknown" },
       statusMessage:
@@ -131,6 +137,10 @@ async function request(
             ? "歪麦请求被拦截，请稍后重试"
             : `歪麦返回 HTTP ${response.status}`,
     });
+    log.end(error);
+    throw error;
+  }
+  responseLogs.set(response, log);
   return response;
 }
 
@@ -167,6 +177,7 @@ export async function verifyWaimaiAccount(
   }, transport);
   try {
     const outer = await response.json();
+    responseLogs.get(response)?.business(outer?.code);
     if (Number(outer?.code) !== 200) checkStatus(outer, 1);
     const user = typeof outer.data === "string"
       ? JSON.parse(decrypt(outer.data, LEGACY_KEY)) : outer.data;
@@ -185,9 +196,10 @@ export async function verifyWaimaiAccount(
       ...(nickname ? { nickname } : {}), ...(avatar ? { avatar } : {}), ...(phone ? { phone } : {}),
     };
   } catch (error: any) {
+    responseLogs.get(response)?.end(error);
     if (error.statusCode) throw error;
     throw createError({ statusCode: 502, statusMessage: "歪麦用户信息无法解析，请稍后重试" });
-  }
+  } finally { responseLogs.get(response)?.end(); }
 }
 
 const requirements: Record<string, string> = {
@@ -299,6 +311,7 @@ async function encryptedService(
   let publicKey: KeyObject, privateKey: KeyObject;
   try {
     const outer = await config.json();
+    responseLogs.get(config)?.business(outer?.code);
     checkStatus(outer, 1);
     const keys = JSON.parse(decrypt(outer.data, LEGACY_KEY));
     if (
@@ -330,12 +343,13 @@ async function encryptedService(
     )
       throw new Error("Invalid service key type");
   } catch (error: any) {
+    responseLogs.get(config)?.end(error);
     if (error.statusCode) throw error;
     throw createError({
       statusCode: 502,
       statusMessage: "歪麦服务配置无法解析，请稍后重试",
     });
-  }
+  } finally { responseLogs.get(config)?.end(); }
   const key = randomBytes(24).toString("hex").slice(0, 32);
   const encryptKey = publicEncrypt(
     { key: publicKey, padding: constants.RSA_PKCS1_PADDING },
@@ -350,12 +364,14 @@ async function encryptedService(
       const text = await response.text();
       const encryptedKey = response.headers.get("encrypt-key");
       const data = JSON.parse(encryptedKey ? decrypt(text, responseKey(encryptedKey, privateKey)) : text);
+      responseLogs.get(response)?.business(data?.code);
       checkStatus(data, successCodes);
       return data;
     } catch (error: any) {
+      responseLogs.get(response)?.end(error);
       if (error.statusCode) throw error;
       throw createError({ statusCode: 502, statusMessage: "歪麦返回内容异常，请稍后重试" });
-    }
+    } finally { responseLogs.get(response)?.end(); }
   };
 }
 
@@ -384,12 +400,14 @@ export async function waimaiOrderRequest(
   );
   try {
     const outer = await response.json();
+    responseLogs.get(response)?.business(outer?.code);
     checkStatus(outer, 1);
     return { ...outer, data: typeof outer.data === "string" ? JSON.parse(decrypt(outer.data, LEGACY_KEY)) : outer.data };
   } catch (error: any) {
+    responseLogs.get(response)?.end(error);
     if (error.statusCode) throw error;
     throw createError({ statusCode: 502, statusMessage: "歪麦返回内容异常，请稍后重试" });
-  }
+  } finally { responseLogs.get(response)?.end(); }
 }
 
 export async function fetchWaimai(

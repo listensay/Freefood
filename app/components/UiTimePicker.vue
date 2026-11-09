@@ -62,11 +62,11 @@ watch(() => [props.min, props.max, props.windows, props.modelValue], () => {
 </script>
 
 <template>
-  <div class="time-picker" role="group" aria-label="报名时间（北京时间）">
-    <div><span>时</span><UiSelect :model-value="pad(hour)" :options="hours" label="报名小时" @update:model-value="choose('hour', $event)" /></div>
-    <span class="time-separator" aria-hidden="true">:</span>
-    <div><span>分</span><UiSelect :model-value="pad(minute)" :options="minutes" label="报名分钟" @update:model-value="choose('minute', $event)" /></div>
-    <span class="time-separator" aria-hidden="true">:</span>
-    <div><span>秒</span><UiSelect :model-value="pad(second)" :options="secondOptions" label="报名秒钟" @update:model-value="choose('second', $event)" /></div>
+  <div class="time-picker mt-3 flex items-end gap-2" role="group" aria-label="报名时间（北京时间）">
+    <div class="min-w-0 flex-1"><span class="mb-1.5 block text-[12px] text-muted">时</span><UiSelect variant="time" :model-value="pad(hour)" :options="hours" label="报名小时" @update:model-value="choose('hour', $event)" /></div>
+    <span class="time-separator flex h-12 items-center text-muted" aria-hidden="true">:</span>
+    <div class="min-w-0 flex-1"><span class="mb-1.5 block text-[12px] text-muted">分</span><UiSelect variant="time" :model-value="pad(minute)" :options="minutes" label="报名分钟" @update:model-value="choose('minute', $event)" /></div>
+    <span class="time-separator flex h-12 items-center text-muted" aria-hidden="true">:</span>
+    <div class="min-w-0 flex-1"><span class="mb-1.5 block text-[12px] text-muted">秒</span><UiSelect variant="time" :model-value="pad(second)" :options="secondOptions" label="报名秒钟" @update:model-value="choose('second', $event)" /></div>
   </div>
 </template>

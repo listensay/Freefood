@@ -1,3 +1,4 @@
+import { logEvent, withLogContext } from "./runtime-logs";
 import { createError } from "h3";
 import type { Offer } from "../../shared/types";
 import { offerWithinRadius } from "../../shared/utils/scope";
@@ -21,7 +22,8 @@ export async function collectActivityPages(
       await new Promise((resolve) =>
         setTimeout(resolve, options.delayMs ?? 600),
       );
-    const result = await fetchPage(page);
+    const result = await withLogContext({ page: page + 1 }, () => fetchPage(page));
+    logEvent({ event: "page.end", outcome: "success", page: page + 1, rows: result.rowKeys.length, offers: result.offers.length, hasMore: result.hasMore });
     let added = 0;
     for (const key of result.rowKeys) {
       if (!seen.has(key)) added++;

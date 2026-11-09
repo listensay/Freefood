@@ -22,28 +22,38 @@ const earliestAdvanceTime = computed(() => {
 </script>
 
 <template>
-  <dialog ref="scheduleDialog" class="location-dialog schedule-dialog" aria-label="预约报名"
+  <dialog ref="scheduleDialog" class="
+    location-dialog schedule-dialog w-[480px] max-w-[calc(100vw-32px)] max-h-[calc(100dvh-48px)] rounded-lg p-8
+    mobile:max-h-[calc(100dvh-32px)] mobile:p-6 overflow-visible
+  " aria-label="预约报名"
     @click="$event.target === scheduleDialog && scheduleDialog?.close()">
     <form @submit.prevent="saveSchedule">
-      <header class="dialog-header">
-        <h2>预约报名</h2>
-        <button type="button" class="icon-button" aria-label="关闭预约报名" @click="scheduleDialog?.close()"><X :size="21" /></button>
+      <header class="dialog-header mb-6 flex items-center justify-between gap-4">
+        <h2 class="text-[22px] leading-[1.2] mobile:text-[20px]">预约报名</h2>
+        <button type="button" class="icon-button grid size-8 place-items-center rounded-full p-0 text-ink hover:bg-surface-strong" aria-label="关闭预约报名" @click="scheduleDialog?.close()"><X :size="21" /></button>
       </header>
-      <p class="schedule-activity-name">{{ scheduleOffer?.name }}</p>
-      <UiSwitch v-if="scheduleLoading || scheduleAdvanceAvailable" class="schedule-coupon-option"
+      <p class="schedule-activity-name mb-4">{{ scheduleOffer?.name }}</p>
+      <UiSwitch v-if="scheduleLoading || scheduleAdvanceAvailable" class="schedule-coupon-option" variant="card"
         :model-value="scheduleUseAdvance" :disabled="scheduleLoading || (!!scheduleOffer && enrollingOfferIds.has(scheduleOffer.id))"
         @update:model-value="setScheduleUseAdvance">
-        <span class="schedule-coupon-text">
+        <span class="schedule-coupon-text grid gap-0.5">
           <span>使用超前抢单券</span>
-          <span class="schedule-coupon-time">{{ scheduleLoading ? '查询卡券…' : `最早 ${earliestAdvanceTime}` }}</span>
+          <span class="schedule-coupon-time text-[12px] text-muted tabular-nums">{{ scheduleLoading ? '查询卡券…' : `最早 ${earliestAdvanceTime}` }}</span>
         </span>
       </UiSwitch>
-      <div class="schedule-time-heading"><span>报名时间</span><span>今天 · 北京时间</span></div>
+      <div class="schedule-time-heading flex justify-between gap-3 text-[14px]"><span>报名时间</span><span class="text-[12px] text-muted">今天 · 北京时间</span></div>
       <UiTimePicker v-if="bounds" v-model="scheduleTime" :min="bounds.min" :max="bounds.max" :windows="windows" @update:model-value="scheduleError = ''" />
-      <p v-else-if="!scheduleLoading" class="inline-error">暂无可报名时段</p>
-      <p v-if="scheduleOptionsError && !scheduleError" class="inline-error" role="alert">{{ scheduleOptionsError }}</p>
-      <p v-if="scheduleError" class="inline-error" role="alert">{{ scheduleError }}</p>
-      <button class="button primary full-width" :disabled="scheduleLoading || !bounds || (!!scheduleOffer && enrollingOfferIds.has(scheduleOffer.id))">确认预约</button>
+      <p v-else-if="!scheduleLoading" class="inline-error mt-4 mb-0 text-[14px] text-primary-error-text">暂无可报名时段</p>
+      <p v-if="scheduleOptionsError && !scheduleError" class="inline-error mt-4 mb-0 text-[14px] text-primary-error-text" role="alert">{{ scheduleOptionsError }}</p>
+      <p v-if="scheduleError" class="inline-error mt-4 mb-0 text-[14px] text-primary-error-text" role="alert">{{ scheduleError }}</p>
+      <button class="
+        mt-6 button primary full-width inline-flex items-center justify-center gap-2 border font-semibold
+        leading-[1.25] whitespace-nowrap no-underline transition-[background,border-color] duration-160
+        ease-[ease] min-h-12 rounded-sm px-[23px] py-[13px] text-[16px] bg-primary border-primary
+        text-on-primary not-disabled:hover:bg-primary-active not-disabled:hover:border-primary-active
+        not-disabled:active:bg-primary-active not-disabled:active:border-primary-active
+        disabled:bg-primary-disabled disabled:border-primary-disabled disabled:text-on-primary w-full
+      " :disabled="scheduleLoading || !bounds || (!!scheduleOffer && enrollingOfferIds.has(scheduleOffer.id))">确认预约</button>
     </form>
   </dialog>
 </template>

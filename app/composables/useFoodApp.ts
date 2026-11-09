@@ -65,7 +65,11 @@ function createFoodApp() {
     notice = ref<{ text: string; error: boolean; source?: "sync" } | null>(null);
   const filter = ref("all"),
     sort = ref("price");
-  const bawangcanProvider = ref<BawangcanProvider>("xiaochan");
+  const requiresCityName = computed(() => data.value.connections.waimai.state === "connected");
+  const canSync = computed(() =>
+    data.value.connections.xiaochan.state === "connected" || requiresCityName.value ||
+    ["connected", "configured"].includes(data.value.connections.meituan.state),
+  );
   const locationDialog = ref<HTMLDialogElement>();
   const locationForm = ref({
     label: "",
@@ -90,11 +94,6 @@ function createFoodApp() {
   });
   onMounted(async () => {
     mounted = true;
-    try {
-      const savedProvider = localStorage.getItem("food-bawangcan-provider");
-      if (savedProvider === "xiaochan" || savedProvider === "waimai")
-        bawangcanProvider.value = savedProvider;
-    } catch {}
     try {
       data.value = await $fetch<DashboardData>("/api/dashboard", { timeout: 10_000 });
     } catch (error) {
@@ -170,10 +169,8 @@ function createFoodApp() {
     if (busy.value || syncing.value || !loaded.value || (automatic && route.path !== "/")) return;
     if (automatic && (
       !data.value.location ||
-      (data.value.connections[bawangcanProvider.value].state !== "connected" &&
-        !["connected", "configured"].includes(data.value.connections.meituan.state)) ||
-      (bawangcanProvider.value === "waimai" &&
-        data.value.connections.waimai.state === "connected" && !data.value.location.cityName)
+      !canSync.value ||
+      (requiresCityName.value && !data.value.location.cityName)
     )) return;
     if (!data.value.location) {
       if (!(await locateAddress())) {
@@ -181,10 +178,7 @@ function createFoodApp() {
         return;
       }
     }
-    if (
-      data.value.connections[bawangcanProvider.value].state !== "connected" &&
-      !["connected", "configured"].includes(data.value.connections.meituan.state)
-    ) {
+    if (!canSync.value) {
       await router.push("/accounts");
       notice.value = {
         text: "请先连接平台账号",
@@ -193,15 +187,13 @@ function createFoodApp() {
       return;
     }
     if (
-      bawangcanProvider.value === "waimai" &&
-      data.value.connections.waimai.state === "connected" &&
+      requiresCityName.value &&
       !data.value.location?.cityName
     ) {
       openLocation();
       return;
     }
     syncing.value = true;
-    const provider = bawangcanProvider.value;
     const revision = dataRevision;
     let polling = false, pollActive = true;
     const pollTimer = setInterval(async () => {
@@ -218,7 +210,7 @@ function createFoodApp() {
           data: DashboardData;
           errors: string[];
           message: string;
-        }>("/api/sync", { provider });
+        }>("/api/sync", { automatic });
         if (!mounted || revision !== dataRevision) return;
         data.value = r.data;
         if ((r.errors.length || !automatic) && route.path === "/") notice.value = {
@@ -414,14 +406,6 @@ function createFoodApp() {
       };
     });
   }
-  function changeCombination(provider: BawangcanProvider) {
-    if (provider === bawangcanProvider.value) return;
-    bawangcanProvider.value = provider;
-    try {
-      localStorage.setItem("food-bawangcan-provider", provider);
-    } catch {}
-    filter.value = "all";
-  }
   function openLocation() {
     locationError.value = "";
     locationForm.value = data.value.location ? { ...data.value.location, cityName: data.value.location.cityName || "" } : {
@@ -514,12 +498,12 @@ function createFoodApp() {
   }
 
   return {
-    loaded, data, busy, enrollingOfferIds, enrollmentActions, now, syncing, notice, filter, sort, bawangcanProvider,
+    loaded, data, busy, enrollingOfferIds, enrollmentActions, now, syncing, notice, filter, sort, requiresCityName,
     scheduleDialog, scheduleOffer, scheduleTime, scheduleError, openSchedule, saveSchedule, cancelSchedule, cancelEnrollment,
     scheduleLoading, scheduleOptionsError, scheduleWindows, scheduleUsesAdvance,
     scheduleUseAdvance, scheduleAdvanceAvailable, scheduleCouponWindows, setScheduleUseAdvance,
     locationDialog, locationForm, locationError,
-    sync, changeCombination, connectComputerWeChat, enroll, connectMeituanBrowser,
+    sync, connectComputerWeChat, enroll, connectMeituanBrowser,
     disconnect, openLocation, locateAddress, saveLocation,
   };
 }

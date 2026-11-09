@@ -1,3 +1,4 @@
+import { beginLoggedRequest, runtimeLogContext } from "./runtime-logs";
 import { chromium } from "playwright-core";
 import { createHash, randomBytes } from "node:crypto";
 import type {
@@ -33,6 +34,7 @@ import type { MeituanBrowserStorage } from "./chrome-meituan";
 export const MEITUAN_URL = MEITUAN_ACTIVITY_URL;
 
 interface BrowserSession {
+  logContext?: ReturnType<typeof runtimeLogContext>;
   browser: Browser;
   context: BrowserContext;
   page: Page;
@@ -372,7 +374,32 @@ async function openBrowser(
         pointerDown: false,
         passportSessionEstablished: false,
       };
+      state.logContext = runtimeLogContext();
       browsers.set(id, state);
+      const requestLogs = new Map<Request, ReturnType<typeof beginLoggedRequest>>();
+      context.on("request", request => {
+        const url = new URL(request.url());
+        if (url.origin !== "https://offsiteact.meituan.com" ||
+          !["/act/ge/getUserInfo", "/act/ge/queryPoiByRecallBiz", "/act/ge/getPageModuleInfo"].includes(url.pathname)) return;
+        let page: number | undefined;
+        if (url.pathname === "/act/ge/queryPoiByRecallBiz") {
+          try {
+            const body = JSON.parse(request.postData() || "{}");
+            if (body.recallBizId !== "cpsSelfPromotionOrder") return;
+            page = body.pageNo;
+          } catch { return; }
+        }
+        requestLogs.set(request, beginLoggedRequest({ provider: "meituan", endpoint: url.origin + url.pathname,
+          method: request.method() as "GET" | "POST", client: "browser", page }, state.logContext));
+      });
+      context.on("requestfailed", request => {
+        requestLogs.get(request)?.end(new Error("网络异常"));
+        requestLogs.delete(request);
+      });
+      context.on("close", () => {
+        for (const log of requestLogs.values()) log.end(new Error("执行中断"));
+        requestLogs.clear();
+      });
       const requestGenerations = new WeakMap<Request, number>();
       context.on("request", request => {
         requestGenerations.set(request, state.captureGeneration);
@@ -453,17 +480,23 @@ async function openBrowser(
           ].includes(url.pathname)
         )
           return;
+        const log = requestLogs.get(response.request());
+        log?.response(response.status(), response.headers()["content-type"] || null, response.headers()["retry-after"]);
         const generation = requestGenerations.get(response.request());
-        if (generation !== state.captureGeneration || response.request().timing().startTime < state.captureAfter) return;
+        if (generation !== state.captureGeneration || response.request().timing().startTime < state.captureAfter) {
+          log?.end(new Error("执行中断")); requestLogs.delete(response.request());
+          return;
+        }
         let offerRequest: Record<string, any> | undefined;
         if (url.pathname === "/act/ge/queryPoiByRecallBiz") {
           try {
             offerRequest = JSON.parse(response.request().postData() || "{}");
-          } catch { return; }
+          } catch (error) { log?.end(error); requestLogs.delete(response.request()); return; }
           if (offerRequest?.recallBizId !== "cpsSelfPromotionOrder") return;
         }
         void (async () => {
           if (!response.ok()) {
+            log?.failure({ statusCode: response.status() });
             const message = activityAccessError(
               response.status(),
               url.pathname === "/act/ge/getUserInfo"
@@ -480,8 +513,10 @@ async function openBrowser(
             return;
           }
           const data = await response.json();
-          if (generation !== state.captureGeneration) return;
+          log?.business(data?.ret);
+          if (generation !== state.captureGeneration) { log?.failure(new Error("执行中断")); return; }
           if (!response.ok() || Number(data.ret) !== 0) {
+            log?.failure(data?.ret === undefined ? new SyntaxError("响应异常") : { statusCode: 422, statusMessage: "请完成验证" });
             if (url.pathname === "/act/ge/getUserInfo")
               state.userError = "美团身份接口拒绝访问，请完成官方安全验证";
             else if (url.pathname === "/act/ge/getPageModuleInfo")
@@ -521,6 +556,7 @@ async function openBrowser(
             state.error = undefined;
           }
         })().catch((error: any) => {
+          log?.failure(error);
           if (generation !== state.captureGeneration) return;
           if (url.pathname === "/act/ge/getUserInfo")
             state.userError = "无法解析美团身份响应，请重新打开试吃官页面";
@@ -528,7 +564,7 @@ async function openBrowser(
             state.error = error.message?.startsWith("美团")
               ? error.message
               : "无法解析美团活动，请检查官方页面或稍后再试";
-        });
+        }).finally(() => { log?.end(); requestLogs.delete(response.request()); });
       });
       context.on("requestfailed", (request) => {
         const url = new URL(request.url());
@@ -799,6 +835,7 @@ export async function fetchMeituan(
   // Open a blank context first; the sync navigation below is the only page load.
   const state = await openBrowser(id, false, "about:blank");
   return browserTask(state, async () => {
+    state.logContext = runtimeLogContext();
     state.lastUsed = Date.now();
     await applyLocation(state.context, location);
     for (let attempt = 0; attempt < 2; attempt++) {

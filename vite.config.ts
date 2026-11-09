@@ -1,11 +1,12 @@
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
+import tailwindcss from "@tailwindcss/vite";
 import { fileURLToPath } from "node:url";
 import { createEvent, sendError, type H3Error } from "h3";
 import { assertRequestAccess } from "./server/utils/request-access.ts";
 
 export default defineConfig({
-  plugins: [vue(), {
+  plugins: [vue(), tailwindcss(), {
     name: "food-local-api-guard",
     configureServer(server) {
       server.middlewares.use((req, res, next) => {

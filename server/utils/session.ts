@@ -59,7 +59,8 @@ export function assertLocalRequest(event: H3Event) {
 
 export function sessionId(event: H3Event): string {
   assertLocalRequest(event);
-  if (process.env.FOOD_DESKTOP === "1") return desktopSessionId();
+  if (event.context.foodSessionId) return event.context.foodSessionId;
+  if (process.env.FOOD_DESKTOP === "1") return event.context.foodSessionId = desktopSessionId();
   let id = getCookie(event, "food-session");
   if (!id || !/^[a-f0-9]{64}$/.test(id)) {
     id = randomBytes(32).toString("hex");
@@ -71,7 +72,7 @@ export function sessionId(event: H3Event): string {
       maxAge: 30 * 86400,
     });
   }
-  return id;
+  return event.context.foodSessionId = id;
 }
 
 export function emptySession(): LocalSession {

@@ -53,6 +53,7 @@ function browserFixture() {
         request: () => request,
         ok: () => status >= 200 && status < 300,
         status: () => status,
+        headers: () => ({ "content-type": "application/json" }),
         json: async () => { reads++; return body(); },
       };
       context.emit("request", request);
@@ -112,6 +113,23 @@ async function setup(t: TestContext) {
 }
 
 try {
+  await test("Meituan logs reuse parsed responses and preserve status without private identity data", async t => {
+    const now = Date.now();
+    const { id, fixture } = await setup(t);
+    t.mock.method(Date, "now", () => now);
+    const { logOperation, exportRuntimeLogs } = await import("../server/utils/runtime-logs");
+    await logOperation({ sessionId: id, action: "sync", provider: "meituan", source: "automatic" }, () => fetchMeituan(id, location));
+    let logs = (await exportRuntimeLogs(id)).entries.filter(row => row.event === "request.end");
+    assert.equal(logs.length, 2);
+    assert.ok(logs.every(row => row.httpStatus === 200 && row.businessCode === 0 && row.source === "automatic"));
+    assert.doesNotMatch(JSON.stringify(logs), /13800000000|fixture-poi|cookie/);
+    fixture.identityStatus = 403; fixture.omitOffers = true;
+    await assert.rejects(logOperation({ sessionId: id, action: "sync", provider: "meituan", source: "manual" }, () => fetchMeituan(id, location)));
+    logs = (await exportRuntimeLogs(id)).entries.filter(row => row.event === "request.end");
+    assert.equal(logs.at(-1)!.httpStatus, 403); assert.equal(logs.at(-1)!.reason, "access-denied");
+    assert.equal(fixture.loads, 2);
+  });
+
   await test("first Meituan sync loads the activity page once instead of cancelling its initial identity response", async t => {
     const { id, fixture } = await setup(t);
     fixture.failRepeatedLoad = true;

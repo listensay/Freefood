@@ -14,6 +14,7 @@ import type { Offer, Provider } from "../../shared/types";
 import { COMPARISON_RADIUS_METERS } from "../../shared/utils/scope";
 import { applyXiaochanEnrollmentUpdates, fetchXiaochanEnrollmentUpdates } from "../utils/xiaochan-enrollment";
 import { applyWaimaiEnrollmentUpdates, fetchWaimaiEnrollmentUpdates } from "../utils/waimai-enrollment";
+import { logOperation } from "../utils/runtime-logs";
 
 const syncingSessions = new Map<string, Set<Provider>>();
 
@@ -56,14 +57,16 @@ export default defineEventHandler(async (event) => {
     const results = await Promise.all(targets.map(async provider => {
       const result = await (async () => {
         try {
-          const offers: Offer[] = provider === "xiaochan"
-            ? await fetchXiaochan(snapshot.xiaochanAccount!, snapshot.location!, scope)
-            : provider === "waimai"
-              ? await fetchWaimai(snapshot.waimaiAccount!, snapshot.location!, fetch, scope)
-              : await fetchMeituan(id, snapshot.location!, scope);
-          const enrollments = provider === "xiaochan" ? await fetchXiaochanEnrollmentUpdates(snapshot, offers)
-            : provider === "waimai" ? await fetchWaimaiEnrollmentUpdates(snapshot, offers) : undefined;
-          return { offers, enrollments, updatedAt: new Date().toISOString() };
+          return await logOperation({ provider }, async () => {
+            const offers: Offer[] = provider === "xiaochan"
+              ? await fetchXiaochan(snapshot.xiaochanAccount!, snapshot.location!, scope)
+              : provider === "waimai"
+                ? await fetchWaimai(snapshot.waimaiAccount!, snapshot.location!, fetch, scope)
+                : await fetchMeituan(id, snapshot.location!, scope);
+            const enrollments = provider === "xiaochan" ? await fetchXiaochanEnrollmentUpdates(snapshot, offers)
+              : provider === "waimai" ? await fetchWaimaiEnrollmentUpdates(snapshot, offers) : undefined;
+            return { offers, enrollments, errors: enrollments?.errors, updatedAt: new Date().toISOString() };
+          });
         } catch (error: any) {
           return { error };
         }
@@ -74,7 +77,7 @@ export default defineEventHandler(async (event) => {
         const sameLocation = JSON.stringify(session.location) === JSON.stringify(snapshot.location);
         if (!sameLocation || !samePlatformAccount(session, snapshot, provider) ||
           !["connected", "configured"].includes(session.connections[provider].state)) return errors;
-        if (result.error) {
+        if ("error" in result) {
           const message = result.error.statusMessage || result.error.message || "平台同步失败";
           errors.push(message);
           if (result.error.statusCode === 401) session.connections[provider] = {

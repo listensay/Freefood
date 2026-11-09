@@ -57,7 +57,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="grid" class="store-grid" :class="{ 'flow-layout': laidOut }">
+  <div ref="grid" class="store-grid grid grid-cols-3 [align-items:start] gap-x-6 compact:grid-cols-2 mobile:grid-cols-1 mobile:gap-x-5" :class="laidOut ? 'flow-layout auto-rows-[1px] gap-y-0' : 'gap-y-6 mobile:gap-y-5'">
     <slot />
   </div>
 </template>
