@@ -42,6 +42,7 @@ export interface LocalSession extends DashboardData {
   meituanAccountId?: string;
   lastSync?: number;
   lastSyncByProvider?: Partial<Record<Provider, number>>;
+  xiaochanSyncBackoff?: { consecutiveBlocks: number; retryAt: number };
 }
 
 const sessions = new Map<string, LocalSession>();

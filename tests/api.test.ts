@@ -810,6 +810,73 @@ try {
       }
     } finally { await browser.close(); }
   });
+  await test("Fixed synchronization times preserve hourly updates, coalesce busy work and realign after sleep", async () => {
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ channel: "chrome", headless: true });
+    try {
+      for (const inFlight of [false, true]) {
+        const context = await browser.newContext();
+        const page = await context.newPage();
+        const hour = Date.parse("2026-11-09T18:00:00+08:00");
+        await page.clock.install({ time: new Date(hour - 60_000) });
+        await page.clock.pauseAt(new Date(hour - 10_000));
+        const dashboard = {
+          location: { label: "南宁", cityName: "南宁市", cityCode: 450103, latitude: 22.82, longitude: 108.36 },
+          connections: {
+            xiaochan: { state: "connected", label: "已登录", profile: { userId: "1" } },
+            waimai: { state: "disconnected", label: "未连接" },
+            meituan: { state: "disconnected", label: "未连接" },
+          },
+          offers: { xiaochan: [], waimai: [], meituan: [] }, updatedAt: {}, enrollmentSchedules: [],
+        };
+        const requested: Array<{ time: number; automatic: boolean }> = [];
+        const firstHandled = Promise.withResolvers<void>();
+        let completeFirst: (() => Promise<void>) | undefined;
+        await page.route("**/api/**", async route => {
+          if (!route.request().url().endsWith("/api/sync")) return route.fulfill({ json: dashboard });
+          requested.push({ time: await page.evaluate(() => Date.now()), automatic: route.request().postDataJSON().automatic });
+          const complete = () => route.fulfill({ json: { data: dashboard, errors: [], message: "同步完成" } });
+          if (requested.length === 1 && inFlight) { completeFirst = complete; firstHandled.resolve(); return; }
+          await complete();
+          firstHandled.resolve();
+        });
+        await page.goto(base);
+        await page.waitForFunction(() => document.querySelector(".sync-button") !== null);
+        await firstHandled.promise;
+        const idle = () => page.waitForFunction(() => !(document.querySelector(".sync-button") as HTMLButtonElement)?.disabled);
+        if (!inFlight) await idle();
+        await page.clock.runFor(9999);
+        assert.equal(requested.length, 1);
+        const hourly = page.waitForRequest(request => request.url().endsWith("/api/sync"));
+        await page.clock.runFor(1);
+        if (inFlight) {
+          assert.equal(requested.length, 1, "An hourly update must wait for the existing request");
+          await completeFirst!();
+        }
+        await hourly;
+        await idle();
+        assert.deepEqual(requested, [{ time: hour - 10_000, automatic: true }, { time: hour, automatic: true }]);
+        await page.clock.runFor(2 * 60_000);
+        const manual = page.waitForResponse(response => response.url().endsWith("/api/sync"));
+        await page.getByRole("button", { name: "同步活动", exact: true }).click();
+        await manual; await idle();
+        const next = page.waitForResponse(response => response.url().endsWith("/api/sync"));
+        await page.clock.runFor(3 * 60_000);
+        await next; await idle();
+        assert.deepEqual(requested.slice(2), [{ time: hour + 2 * 60_000, automatic: false }, { time: hour + 5 * 60_000, automatic: true }]);
+        const resumed = page.waitForResponse(response => response.url().endsWith("/api/sync"));
+        await page.clock.fastForward(123 * 60_000);
+        await resumed; await idle();
+        assert.equal(requested.length, 5, "Missed slots must be coalesced into one update");
+        const realigned = page.waitForResponse(response => response.url().endsWith("/api/sync"));
+        await page.clock.runFor(2 * 60_000);
+        await realigned; await idle();
+        assert.equal(requested[5]!.time, hour + 130 * 60_000);
+        await context.close();
+      }
+    } finally { await browser.close(); }
+  });
+
   await test("Successful automatic synchronization clears its old error while preserving other action errors", async () => {
     const { chromium } = await import("playwright-core");
     const browser = await chromium.launch({ channel: "chrome", headless: true });

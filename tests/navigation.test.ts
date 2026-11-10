@@ -163,6 +163,69 @@ try {
     }
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
   }, { reducedMotion: true }));
+  for (const width of [1280, 900, 390]) {
+    await test(`Sync polling and completion preserve the current scroll position at ${width}px`, async () => fixture(async page => {
+      await page.setViewportSize({ width, height: 820 });
+      await page.clock.setFixedTime(new Date("2026-11-10T04:01:00Z"));
+      const dashboard = structuredClone(data);
+      dashboard.connections.xiaochan = { state: "connected", label: "已登录", profile: { userId: "1" } };
+      dashboard.offers.xiaochan = Array.from({ length: 30 }, (_, index) => ({
+        ...offer, id: `xiaochan:${index + 1}`, name: `滚动测试店 ${index + 1}`, meituanPoiId: String(index + 1),
+      }));
+      dashboard.offers.meituan = dashboard.offers.xiaochan.map(row => ({ ...row, id: `meituan:${row.meituanPoiId}`, provider: "meituan" }));
+      let completeSync: (() => void) | undefined;
+      const automaticRequests: boolean[] = [];
+      await page.route("**/api/**", async route => {
+        if (new URL(route.request().url()).pathname === "/api/sync") {
+          automaticRequests.push(route.request().postDataJSON().automatic);
+          await new Promise<void>(resolve => { completeSync = resolve; });
+          return route.fulfill({ json: { data: dashboard, errors: [], message: "同步完成" } });
+        }
+        return route.fulfill({ json: dashboard });
+      });
+      const settleLayout = () => page.evaluate(() => new Promise<void>(resolve =>
+        requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
+      ));
+      const scrollTo = async (fraction: number) => {
+        await page.evaluate(fraction => window.scrollTo(0, (document.documentElement.scrollHeight - innerHeight) * fraction), fraction);
+        await settleLayout();
+        const position = await page.evaluate(() => window.scrollY);
+        assert.ok(position > 1000, "The fixture must extend beyond the viewport");
+        return position;
+      };
+      const assertPosition = async (position: number, phase: string) => {
+        await settleLayout();
+        const current = await page.evaluate(() => window.scrollY);
+        assert.ok(Math.abs(current - position) <= 2, `${phase}: expected scroll ${position}, received ${current}`);
+      };
+      try {
+        await page.goto(base);
+        await page.waitForFunction(() => document.querySelectorAll(".store-card").length === 30 && document.querySelector(".sync-button")?.textContent?.includes("正在同步"));
+        for (const automatic of [true, false]) {
+          if (!automatic) await page.getByRole("button", { name: "同步活动", exact: true }).click();
+          await page.getByRole("button", { name: "正在同步…", exact: true }).waitFor();
+          for (const fraction of [0.5, 1]) {
+            const position = await scrollTo(fraction);
+            for (const row of dashboard.offers.xiaochan) row.inventory = row.inventory! - 1;
+            const inventory = dashboard.offers.xiaochan[0]!.inventory;
+            await page.waitForFunction(inventory => document.querySelector(".rebate-inventory")?.textContent === `剩 ${inventory} 份`, inventory);
+            await assertPosition(position, `${automatic ? "Automatic" : "Manual"} sync polling`);
+          }
+          const position = await page.evaluate(() => window.scrollY);
+          completeSync!();
+          await page.getByRole("button", { name: "同步活动", exact: true }).waitFor();
+          if (automatic) await assertPosition(position, "Automatic sync completion");
+          else {
+            await page.getByText("同步完成", { exact: true }).waitFor();
+            await settleLayout();
+            const current = await page.evaluate(() => window.scrollY);
+            assert.ok(current >= position - 2 && current <= position + 150, "The completion notice must not send the page to the top");
+          }
+        }
+        assert.deepEqual(automaticRequests, [true, false]);
+      } finally { completeSync?.(); }
+    }));
+  }
 } finally {
   await browser.close();
   server.httpServer.closeAllConnections();

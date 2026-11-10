@@ -6,6 +6,7 @@ import type { BawangcanProvider, DashboardData, EnrollmentTimeWindow, Provider, 
 import { providerShortNames } from "#shared/types";
 import { addressFromGeocode } from "#shared/utils/location";
 import { defaultScheduleTime, scheduleTimeWindows, xiaochanAdvanceWindow } from "#shared/utils/xiaochan-advance-time";
+import { nextAutomaticSyncCheck } from "#shared/utils/sync-time";
 
 const foodAppKey: InjectionKey<ReturnType<typeof createFoodApp>> = Symbol("food-app");
 
@@ -79,7 +80,8 @@ function createFoodApp() {
     longitude: undefined as number | undefined,
   });
   const locationError = ref("");
-  let syncTimer: ReturnType<typeof setInterval> | undefined;
+  let syncTimer: ReturnType<typeof setTimeout> | undefined;
+  let pendingScheduledSync = false;
   let scheduleTimer: ReturnType<typeof setInterval> | undefined;
   let refreshingSchedules = false;
   let mounted = false;
@@ -87,8 +89,26 @@ function createFoodApp() {
   let scheduleRevision = 0;
   let scheduleOptionsRequest = 0;
   const refreshingProfiles = new Set<BawangcanProvider>();
+  function runScheduledSync() {
+    if (!mounted || route.path !== "/") return;
+    if (busy.value || syncing.value) { pendingScheduledSync = true; return; }
+    pendingScheduledSync = false;
+    void sync(true);
+  }
+  function scheduleAutomaticSync() {
+    const current = Date.now();
+    syncTimer = setTimeout(() => {
+      if (!mounted) return;
+      scheduleAutomaticSync();
+      runScheduledSync();
+    }, nextAutomaticSyncCheck(current) - current);
+  }
+  watch([busy, syncing], () => {
+    if (pendingScheduledSync && !busy.value && !syncing.value) runScheduledSync();
+  });
   watch(() => route.path, () => {
     filter.value = "all";
+    if (route.path !== "/") pendingScheduledSync = false;
     if (!mounted || !loaded.value) return;
     if (route.path === "/accounts") void refreshProfiles();
   });
@@ -102,7 +122,7 @@ function createFoodApp() {
     loaded.value = true;
     if (mounted) {
       void refreshProfiles();
-      syncTimer = setInterval(() => { void sync(true); }, 5 * 60_000);
+      scheduleAutomaticSync();
       scheduleTimer = setInterval(() => { now.value = new Date(); void refreshSchedules(); }, 1000);
       if (route.path === "/" && !data.value.location) await locateAddress();
       void sync(true);
@@ -111,7 +131,8 @@ function createFoodApp() {
   onBeforeUnmount(() => {
     mounted = false;
     scheduleOptionsRequest++;
-    clearInterval(syncTimer);
+    clearTimeout(syncTimer);
+    pendingScheduledSync = false;
     clearInterval(scheduleTimer);
   });
   function showError(error: any, source?: "sync") {

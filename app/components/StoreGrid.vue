@@ -13,6 +13,8 @@ function scheduleLayout() {
     const element = grid.value;
     if (!element?.clientWidth) return;
     const items = Array.from(element.children) as HTMLElement[];
+    // Keep the scroll range intact while card positions are cleared for measurement.
+    element.style.minHeight = `${element.getBoundingClientRect().height}px`;
     for (const card of items) {
       card.style.gridColumn = "";
       card.style.gridRow = "";
@@ -21,6 +23,7 @@ function scheduleLayout() {
     const columns = style.gridTemplateColumns.split(" ").length;
     if (columns === 1) {
       laidOut.value = false;
+      element.style.minHeight = "";
       return;
     }
     const gap = Math.ceil(parseFloat(style.columnGap) || 0);
@@ -33,6 +36,7 @@ function scheduleLayout() {
       heights[column]! += sizes[index]! + gap;
     });
     laidOut.value = true;
+    element.style.minHeight = "";
   });
 }
 
